@@ -18,7 +18,6 @@ jobs:
           base_image: raspios_lite_arm64:latest
           image_additional_mb: 512
           cpu: cortex-a53
-          cpu_info: cpuinfo/raspberrypi_zero2_w_arm64
           copy_repository_path: /radiolog-build
           optimize_image: yes
           use_systemd_nspawn: yes
