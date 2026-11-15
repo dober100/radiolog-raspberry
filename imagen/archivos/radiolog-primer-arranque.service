@@ -1,0 +1,13 @@
+[Unit]
+Description=RadioLog: Wi-Fi y ajustes de la partición visible desde Windows
+After=NetworkManager.service
+Wants=NetworkManager.service
+Before=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/radiolog/primer_arranque.sh
+
+[Install]
+WantedBy=multi-user.target

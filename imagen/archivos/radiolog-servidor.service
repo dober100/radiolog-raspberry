@@ -1,0 +1,17 @@
+[Unit]
+Description=RadioLog: servidor de radio (arranque automático)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+User=radiolog
+Group=radiolog
+SupplementaryGroups=dialout audio plugdev
+StateDirectory=radiolog
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/radiolog/radiolog_arranque.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

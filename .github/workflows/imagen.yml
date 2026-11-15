@@ -1,0 +1,39 @@
+name: Construir la imagen de la Raspberry Pi
+
+# Se lanza a mano: pestaña «Actions» -> «Construir la imagen de la Raspberry Pi» -> «Run workflow».
+# Tarda unos 15-25 minutos. Al terminar, la imagen (radiolog-raspberry.img.xz) está en «Artifacts» al final de la página de esa ejecución.
+on:
+  workflow_dispatch:
+
+jobs:
+  imagen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparar la imagen (Raspberry Pi OS Lite de 64 bits + RadioLog)
+        id: arm
+        uses: pguyot/arm-runner-action@v2
+        with:
+          base_image: raspios_lite_arm64:latest
+          image_additional_mb: 512
+          cpu: cortex-a53
+          cpu_info: cpuinfo/raspberrypi_zero2_w_arm64
+          copy_repository_path: /radiolog-build
+          optimize_image: yes
+          use_systemd_nspawn: yes
+          commands: |
+            bash /radiolog-build/imagen/instalar_en_imagen.sh
+
+      - name: Comprimir
+        run: |
+          mkdir salida
+          sudo cp "${{ steps.arm.outputs.image }}" salida/radiolog-raspberry.img
+          sudo xz -T0 -6 salida/radiolog-raspberry.img
+          cd salida && sha256sum radiolog-raspberry.img.xz | tee radiolog-raspberry.img.xz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: radiolog-raspberry-imagen
+          path: salida/*
+          retention-days: 30

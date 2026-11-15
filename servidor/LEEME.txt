@@ -1,0 +1,15 @@
+RadioLog · servidor de radio
+============================
+
+1. Instala Python 3.9 o superior:                  sudo apt install python3-pip libportaudio2    y luego    pip install pyserial numpy sounddevice
+2. Saca una clave y guárdala en un fichero:         python3 radiolog_servidor.py --nueva-clave > clave.txt
+   Para ver cómo se llama la tarjeta de sonido de la radio: python3 radiolog_servidor.py --listar-audio
+3. Arranca el servidor (ejemplo con la FTDX10):     python3 radiolog_servidor.py --puerto-serie /dev/ttyUSB0 --modelo ftdx10 --audio-entrada "USB AUDIO CODEC" --audio-salida "USB AUDIO CODEC" --clave-fichero clave.txt
+4. En RadioLog: Configuración -> Radio/CAT -> Método «Radio remota», dirección de esta máquina, puerto 8765 y la misma clave.
+
+Con la radio conectada por USB a la Raspberry Pi suele aparecer como /dev/ttyUSB0 (o ttyACM0); el usuario debe estar en el grupo dialout:
+    sudo usermod -a -G dialout $USER      (y volver a entrar)
+
+Seguridad: todo va cifrado (TLS) con un certificado propio que se crea la primera vez (Raspberry Pi OS ya trae openssl). Aun así, lo más seguro es usarlo dentro de
+una VPN (Tailscale, WireGuard) y limitar quién puede conectar:  --redes-permitidas 100.64.0.0/10   (la red de Tailscale). Evita abrir el puerto 8765 a internet.
+El servidor suelta el PTT solo si el cliente desaparece, deja de dar señales o se supera --max-tx segundos transmitiendo.

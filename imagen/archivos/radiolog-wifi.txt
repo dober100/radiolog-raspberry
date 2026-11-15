@@ -1,0 +1,10 @@
+# RadioLog · Wi-Fi de la Raspberry
+#
+# Solo si NO usa cable de red. Con cable (Ethernet) no hace falta tocar nada: enchufe el cable y listo.
+#
+# Escriba el nombre y la contraseña de su Wi-Fi después del signo =, SIN comillas, y guarde el fichero.
+# Luego saque la tarjeta del ordenador y métala en la Raspberry.
+
+red = NOMBRE_DE_SU_WIFI
+clave =
+pais = ES

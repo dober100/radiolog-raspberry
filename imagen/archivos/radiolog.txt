@@ -1,0 +1,24 @@
+# RadioLog · ajustes del servidor de radio (OPCIONAL)
+#
+# Normalmente NO hay que tocar nada: la Raspberry encuentra sola la radio y la tarjeta de sonido, y saca una clave
+# que verá en http://radiolog.local. Todo lo que sigue sirve para casos especiales.
+# Quite el # del principio de la línea que quiera usar.
+
+# Modelo de radio y puerto (si la búsqueda automática no la encuentra):
+# modelo = ftdx10                  (ftdx10, ft-991a o ft-710)
+# puerto_serie = /dev/ttyUSB0
+# baudios = 38400
+
+# Tarjeta de sonido de la radio (un trozo de su nombre):
+# audio_entrada = USB Audio CODEC
+# audio_salida = USB Audio CODEC
+
+# Clave propia en vez de la automática (mínimo 8 caracteres):
+# clave = mi-clave-segura
+
+# Puerto de red (por defecto 8765) y desde qué redes se acepta conectar:
+# puerto = 8765
+# redes_permitidas = 192.168.1.0/24
+
+# Solo para quien mantiene el equipo: activa el acceso por SSH (usuario «radiolog») con esta contraseña:
+# ssh_clave = otra-contraseña
