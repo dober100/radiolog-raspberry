@@ -8,7 +8,11 @@ export DEBIAN_FRONTEND=noninteractive
 
 # 1. Programas que necesita el servidor (Python y las bibliotecas de serie, audio y cifrado, y el nombre «radiolog.local» en la red)
 apt-get update
-apt-get install -y --no-install-recommends python3 python3-serial python3-numpy python3-sounddevice libportaudio2 openssl avahi-daemon alsa-utils
+apt-get install -y --no-install-recommends python3 python3-pip python3-cffi python3-serial python3-numpy libportaudio2 openssl avahi-daemon alsa-utils
+# «sounddevice» no está como paquete de apt en esta versión: se instala con pip (el sistema marca pip como «gestionado», de ahí --break-system-packages)
+pip3 install --no-cache-dir --break-system-packages sounddevice
+python3 -c "import serial, numpy; print('serie y numpy: bien')"
+python3 -c "import sounddevice; print('sounddevice', sounddevice.__version__)" || echo "AVISO: sounddevice no se puede importar aquí (puede ser normal sin tarjeta de sonido); se comprobará en la Raspberry"
 
 # 2. Un usuario sin contraseña para el servicio (nadie entra con él; si hace falta, se activa con ssh_clave en radiolog.txt)
 id radiolog >/dev/null 2>&1 || useradd -m -s /bin/bash -G dialout,audio,plugdev radiolog
