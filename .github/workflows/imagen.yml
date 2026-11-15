@@ -7,7 +7,7 @@ on:
 
 jobs:
   imagen:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04            # (fijo: en ubuntu-latest, que ya es la 26.04, no existe el paquete qemu-user-static que necesita la acción)
     steps:
       - uses: actions/checkout@v4
 
