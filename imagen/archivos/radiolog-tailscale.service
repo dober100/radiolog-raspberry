@@ -1,0 +1,14 @@
+[Unit]
+Description=RadioLog: permite unir la Raspberry a Tailscale desde la página (sin ser administrador)
+After=tailscaled.service
+Wants=tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/tailscale set --operator=radiolog
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

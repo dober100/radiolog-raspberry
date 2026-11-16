@@ -24,6 +24,7 @@ for _cand in (_AQUI, _AQUI.parent):
         sys.path.insert(0, str(_cand))
         break
 from core.remoto import autoconfig as AC  # noqa: E402
+from core.remoto import tailscale as TS  # noqa: E402
 
 DIR_DATOS = Path(os.environ.get("RADIOLOG_DATOS", "/var/lib/radiolog"))
 
@@ -86,7 +87,61 @@ def ultimo_emparejado(datos: Path = DIR_DATOS, maximo_s: int = 300) -> dict | No
         return None
 
 
-def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante: int = 0, emparejado: dict | None = None) -> str:
+def tailscale_estado() -> dict:
+    """Cómo está esta Raspberry respecto a Tailscale (ver core/remoto/tailscale.py). Función aparte para poder sustituirla en las pruebas."""
+    return TS.estado_propio()
+
+
+def lista_para_llevar(estado: dict, ts: dict, vpn_probada: dict | None) -> list[dict]:
+    """Lo que hay que comprobar antes de llevarse la Raspberry lejos. Cada punto: {ok, texto, falta} (`falta`: qué hacer si no está). Todos en verde = «lista para llevar»."""
+    corriendo = ts.get("estado") == "Running"
+    puntos = [{"ok": estado.get("estado") == "listo", "texto": "La radio está detectada",
+               "falta": "Encienda la radio y compruebe el cable USB a la Raspberry."}]
+    if not ts.get("instalado"):
+        puntos.append({"ok": False, "texto": "Tailscale (la VPN) está instalado en esta Raspberry", "falta": "Esta imagen no lo trae: hace falta una imagen más nueva."})
+        return puntos
+    nombre = f" como «{ts['nombre']}» ({ts['ip']})" if corriendo and ts.get("ip") else ""
+    puntos.append({"ok": corriendo, "texto": "La Raspberry está unida a Tailscale" + nombre,
+                   "falta": "Pulse «Conectar a Tailscale» y autorice el enlace con su cuenta."})
+    sin_caducidad = corriendo and not ts.get("caduca")
+    puntos.append({"ok": sin_caducidad, "texto": "La clave de Tailscale de esta Raspberry no caduca",
+                   "falta": ("Entre en login.tailscale.com → Machines, busque esta Raspberry, menú «⋯» → «Disable key expiry». Si no, a los 6 meses la VPN dejaría de funcionar "
+                             "y no se podría arreglar a distancia." + (f" Caduca el {ts['caduca'][:10]}." if ts.get("caduca") else ""))})
+    puntos.append({"ok": bool(vpn_probada), "texto": "Un RadioLog se ha conectado a través de la VPN",
+                   "falta": "En RadioLog ponga como dirección la de la VPN (la que empieza por 100.) en lugar de la de casa, pida la clave y conecte una vez."})
+    return puntos
+
+
+def _bloque_vpn(estado: dict, ts: dict, vpn_probada: dict | None) -> str:
+    """La tarjeta de la VPN (Tailscale) y la lista «lista para llevar». Vacío si el servidor aún no ha arrancado."""
+    e = html.escape
+    if estado.get("estado") not in ("listo", "sin_radio", "sin_soporte"):
+        return ""
+    if ts.get("instalado"):
+        if ts.get("estado") == "Running":
+            conectar = f'<div class="ok">✔ Unida a Tailscale. Dirección en la VPN: <b>{e(ts.get("ip", ""))}</b></div>'
+        elif ts.get("url_login"):
+            conectar = ('<div class="espera">Abra este enlace <b>en su ordenador o móvil</b> e inicie sesión con su cuenta de Tailscale:<br>'
+                        f'<a href="{e(ts["url_login"])}" target="_blank" style="color:#fde68a;word-break:break-all">{e(ts["url_login"])}</a></div>')
+        else:
+            conectar = ('<form method="post" action="/tailscale/conectar"><button class="grande" type="submit">Conectar a Tailscale</button></form>'
+                        '<p class="peq">Solo hace falta si va a usar la radio desde fuera de casa. Necesita una cuenta gratuita de Tailscale.</p>')
+        vpn = f'<div class="caja"><h2>Acceso desde fuera de casa (VPN)</h2>{conectar}</div>'
+    else:
+        vpn = ""
+    puntos = lista_para_llevar(estado, ts, vpn_probada)
+    filas = "".join(f'<li class="{"si" if p["ok"] else "no"}">{"✔" if p["ok"] else "✖"} {e(p["texto"])}'
+                    + ("" if p["ok"] else f'<div class="peq">{e(p["falta"])}</div>') + "</li>" for p in puntos)
+    if all(p["ok"] for p in puntos):
+        cab = '<div class="ok" style="font-size:28px">✔ LISTA PARA LLEVAR</div>'
+    else:
+        primero = next(p for p in puntos if not p["ok"])
+        cab = f'<div class="espera" style="font-size:24px">AÚN NO: falta · {e(primero["texto"])}</div>'
+    return vpn + f'<div class="caja"><h2>Antes de llevarse la Raspberry lejos</h2>{cab}<ul class="lista">{filas}</ul></div>'
+
+
+def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante: int = 0, emparejado: dict | None = None,
+           tailscale: dict | None = None, vpn_probada: dict | None = None) -> str:
     """El HTML de la página (autocontenido, se refresca solo cada 5 segundos)."""
     e = html.escape
     fondo, texto, icono = _COLOR.get(estado.get("estado", ""), _COLOR["sin_radio"])
@@ -130,6 +185,7 @@ def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante:
  </table>
  <p class="peq">Si «{e(direccion)}» no funciona en su ordenador, use la dirección numérica: <b>{otras or 'sin red'}</b></p>
 </details>"""
+    datos += _bloque_vpn(estado, tailscale or {"instalado": False}, vpn_probada)
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="5"><title>RadioLog · Servidor de radio</title>
@@ -142,6 +198,8 @@ def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante:
  .espera{{background:#78350f;color:#fde68a;border-radius:10px;padding:14px;font-size:22px}}
  .pasos{{padding-left:22px;line-height:1.5}} summary{{cursor:pointer;font-size:20px;color:#cbd5e1}}
  table{{width:100%;border-collapse:collapse;margin-top:10px}} td{{padding:10px 6px;border-bottom:1px solid #334155;font-size:26px}} td:first-child{{color:#94a3b8;width:34%}}
+ .lista{{list-style:none;padding:0;margin:10px 0 0}} .lista li{{padding:8px 0;border-bottom:1px solid #334155;font-size:20px}}
+ .lista li.si{{color:#bbf7d0}} .lista li.no{{color:#fde68a}}
  .peq,small{{color:#94a3b8;font-size:16px}} button{{font-size:18px;padding:6px 14px;margin-left:10px}}
  button.grande{{font-size:24px;padding:14px 24px;margin:6px 0;background:#16a34a;color:#fff;border:0;border-radius:10px}}
  #clave{{font-family:Consolas,monospace;letter-spacing:1px}}
@@ -158,8 +216,8 @@ class _Manejador(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?")[0] in ("/", "/index.html"):
-            cuerpo = pagina(leer_estado(self.datos), socket.gethostname(), ips_locales(), emparejamiento_restante(self.datos),
-                            ultimo_emparejado(self.datos)).encode("utf-8")
+            cuerpo = pagina(leer_estado(self.datos), socket.gethostname(), ips_locales(), emparejamiento_restante(self.datos), ultimo_emparejado(self.datos),
+                            tailscale_estado(), _leer_json(self.datos / "vpn_probada.json")).encode("utf-8")
             tipo = "text/html; charset=utf-8"
         elif self.path.split("?")[0] == "/estado.json":
             e = leer_estado(self.datos)
@@ -176,10 +234,14 @@ class _Manejador(BaseHTTPRequestHandler):
         self.wfile.write(cuerpo)
 
     def do_POST(self):
-        if self.path.split("?")[0] != "/emparejar":
+        ruta = self.path.split("?")[0]
+        if ruta not in ("/emparejar", "/tailscale/conectar"):
             self.send_error(404)
             return
-        abrir_emparejamiento(self.datos)
+        if ruta == "/tailscale/conectar":
+            TS.iniciar_union(socket.gethostname().split(".")[0] or "radiolog", fichero_salida=str(self.datos / "tailscale_up.log"))
+        else:
+            abrir_emparejamiento(self.datos)
         self.send_response(303)                            # de vuelta a la página, que ya dice «Emparejando…»
         self.send_header("Location", "/")
         self.send_header("Content-Length", "0")

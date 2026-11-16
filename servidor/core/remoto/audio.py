@@ -12,6 +12,7 @@ Necesita numpy y sounddevice (en Raspberry Pi: sudo apt install libportaudio2 y 
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Callable, Optional
 
 import numpy as np
@@ -85,6 +86,22 @@ class Remuestreador:
 
 # ── dispositivos ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+_abiertos = 0
+_cerrojo_abiertos = threading.Lock()
+
+
+def contar_flujo(delta: int) -> None:
+    """Anota que se abre (+1) o se cierra (-1) un flujo de audio de la radio remota: mientras haya alguno, no se debe reiniciar PortAudio."""
+    global _abiertos
+    with _cerrojo_abiertos:
+        _abiertos = max(0, _abiertos + int(delta))
+
+
+def hay_flujos_abiertos() -> bool:
+    with _cerrojo_abiertos:
+        return _abiertos > 0
+
+
 def listar(entrada: bool = True, sd=None) -> list[dict]:
     """Dispositivos de entrada (o de salida) con su índice, nombre, API de audio y frecuencia por defecto."""
     if sd is None:
@@ -148,6 +165,8 @@ class CapturaRX:
                     self._stream = sd.InputStream(device=idx, channels=canales, samplerate=fs, dtype="float32",
                                                   blocksize=int(fs * TRAMA_MS / 1000), callback=self._callback)
                     self._stream.start()
+                    contar_flujo(+1)
+                    self._contado = True
                     log.info("Captura de audio abierta: %s a %d Hz", info.get("name", "?"), fs)
                     return True
                 except Exception as e:           # la tarjeta no admite esa frecuencia: se prueba la siguiente
@@ -179,3 +198,6 @@ class CapturaRX:
                 s.close()
             except Exception:
                 pass
+        if getattr(self, "_contado", False):
+            self._contado = False
+            contar_flujo(-1)

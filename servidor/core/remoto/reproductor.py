@@ -58,6 +58,8 @@ class ReproductorAudio:
                     self._stream = sd.OutputStream(device=idx, channels=1, samplerate=fs, dtype="float32", callback=self._callback,
                                                    blocksize=int(fs * 0.02))
                     self._stream.start()
+                    A.contar_flujo(+1)
+                    self._contado = True
                     log.info("Salida de audio abierta: %s a %d Hz", info.get("name", "?"), fs)
                     return True
                 except Exception as e:
@@ -77,6 +79,9 @@ class ReproductorAudio:
                 s.close()
             except Exception:
                 pass
+        if getattr(self, "_contado", False):
+            self._contado = False
+            A.contar_flujo(-1)
         with self._lock:
             self._cola.clear()
             self._muestras_en_cola = 0

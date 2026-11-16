@@ -8,11 +8,20 @@ export DEBIAN_FRONTEND=noninteractive
 
 # 1. Programas que necesita el servidor (Python y las bibliotecas de serie, audio y cifrado, y el nombre «radiolog.local» en la red)
 apt-get update
-apt-get install -y --no-install-recommends python3 python3-pip python3-cffi python3-serial python3-numpy libportaudio2 openssl avahi-daemon alsa-utils
+apt-get install -y --no-install-recommends python3 python3-pip python3-cffi python3-serial python3-numpy libportaudio2 openssl avahi-daemon alsa-utils curl ca-certificates
 # «sounddevice» no está como paquete de apt en esta versión: se instala con pip (el sistema marca pip como «gestionado», de ahí --break-system-packages)
 pip3 install --no-cache-dir --break-system-packages sounddevice
 python3 -c "import serial, numpy; print('serie y numpy: bien')"
 python3 -c "import sounddevice; print('sounddevice', sounddevice.__version__)" || echo "AVISO: sounddevice no se puede importar aquí (puede ser normal sin tarjeta de sonido); se comprobará en la Raspberry"
+
+# 1b. Tailscale (la VPN gratuita para usar la radio desde fuera de casa): el repositorio oficial de su versión de Debian. La Raspberry se une a la cuenta del usuario
+#     desde la página http://radiolog.local, no aquí. Si algo de esto falla, la construcción se para (se vería en el registro).
+. /etc/os-release
+curl -fsSL "https://pkgs.tailscale.com/stable/debian/${VERSION_CODENAME}.noarmor.gpg" -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+curl -fsSL "https://pkgs.tailscale.com/stable/debian/${VERSION_CODENAME}.tailscale-keyring.list" -o /etc/apt/sources.list.d/tailscale.list
+apt-get update
+apt-get install -y tailscale
+systemctl enable tailscaled
 
 # 2. Un usuario sin contraseña para el servicio (nadie entra con él; si hace falta, se activa con ssh_clave en radiolog.txt)
 id radiolog >/dev/null 2>&1 || useradd -m -s /bin/bash -G dialout,audio,plugdev radiolog
@@ -24,7 +33,7 @@ install -d /opt/radiolog
 cp -a "$REPO/servidor/." /opt/radiolog/
 install -m 755 "$REPO/imagen/archivos/primer_arranque.sh" /opt/radiolog/primer_arranque.sh
 cp "$REPO"/imagen/archivos/*.service /etc/systemd/system/
-systemctl enable radiolog-servidor.service radiolog-panel.service radiolog-primer-arranque.service
+systemctl enable radiolog-servidor.service radiolog-panel.service radiolog-primer-arranque.service radiolog-tailscale.service
 
 # 4. Nombre en la red: radiolog.local (el equipo se llamaba raspberrypi) y hora de España
 echo radiolog > /etc/hostname

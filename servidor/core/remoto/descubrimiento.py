@@ -133,6 +133,28 @@ def _ips_locales() -> list[str]:
     return salida
 
 
+def _destinos_tailscale() -> list[str]:
+    """Los otros equipos de la red privada de Tailscale (si está instalado e iniciado): a cada uno se le pregunta por su dirección, porque la difusión no cruza la VPN.
+    Así se encuentra un servidor de radio que está lejos, sin saber su dirección. El módulo no viaja en el paquete de la Raspberry: sin él, simplemente no hay nada."""
+    try:
+        from core.remoto import tailscale
+        return tailscale.direcciones_para_buscar()
+    except Exception:
+        return []
+
+
+def _mejor_direccion(nueva: str, actual: str) -> bool:
+    """Un mismo servidor puede contestar por varias direcciones. Se prefiere la de la VPN (Tailscale): sirve igual en casa que lejos, así que es la que conviene guardar."""
+    try:
+        from core.remoto.tailscale import es_direccion_tailscale as vpn
+    except Exception:
+        def vpn(_ip):
+            return False
+    if vpn(nueva) != vpn(actual):
+        return vpn(nueva)
+    return nueva < actual
+
+
 def destinos_de_difusion() -> list[str]:
     """A dónde preguntar: la difusión general y la de la red /24 de cada tarjeta de red del equipo."""
     d = ["255.255.255.255"]
@@ -146,7 +168,7 @@ def destinos_de_difusion() -> list[str]:
 def buscar_servidores(espera: float = 1.5, puerto: int = PUERTO_DESCUBRIMIENTO, destinos: Optional[Iterable[str]] = None) -> list[dict]:
     """Pregunta en la red y recoge las respuestas durante `espera` segundos. Devuelve [{host, puerto, nombre, radio, cifrado}], un elemento por servidor
     (si un servidor contesta por varias direcciones, se queda con una)."""
-    destinos = list(destinos) if destinos is not None else destinos_de_difusion()
+    destinos = list(destinos) if destinos is not None else destinos_de_difusion() + _destinos_tailscale()
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     encontrados: dict[str, dict] = {}
     try:
@@ -177,7 +199,7 @@ def buscar_servidores(espera: float = 1.5, puerto: int = PUERTO_DESCUBRIMIENTO, 
             clave = str(d.get("id") or f"{origen[0]}:{p}")
             nuevo = {"host": origen[0], "puerto": p, "nombre": str(d.get("nombre", "")), "radio": str(d.get("radio", "")), "cifrado": bool(d.get("cifrado", True)),
                      "emparejando": bool(d.get("emparejando", False))}
-            if clave not in encontrados or origen[0] < encontrados[clave]["host"]:      # mismo servidor por otra dirección: se queda la menor (resultado estable)
+            if clave not in encontrados or _mejor_direccion(origen[0], encontrados[clave]["host"]):    # mismo servidor por otra dirección: la de la VPN, y si no, la menor
                 encontrados[clave] = nuevo
     finally:
         s.close()

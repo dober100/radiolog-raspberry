@@ -130,6 +130,21 @@ class ServidorRadio:
             except OSError:
                 pass
 
+    def _anotar_conexion(self, ip: str) -> None:
+        """Deja escrito (junto a los demás ficheros de estado) que un RadioLog se acaba de conectar con la clave y, si llegó por la VPN de Tailscale (100.64.0.0/10), que la VPN
+        queda PROBADA de punta a punta: la página de la Raspberry lo enseña en su lista «lista para llevar»."""
+        if self._emparejar_fichero is None:
+            return
+        try:
+            por_vpn = ipaddress.ip_address(ip) in ipaddress.ip_network("100.64.0.0/10")
+            carpeta = self._emparejar_fichero.parent
+            nota = json.dumps({"ip": ip, "cuando": time.time(), "vpn": por_vpn})
+            (carpeta / "conexion.json").write_text(nota, encoding="utf-8")
+            if por_vpn:
+                (carpeta / "vpn_probada.json").write_text(nota, encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+
     def _anotar_emparejado(self, ip: str) -> None:
         """Deja escrito con quién se acaba de emparejar (junto al fichero de emparejamiento), para que la página de la Raspberry lo enseñe."""
         if self._emparejar_fichero is None:
@@ -301,6 +316,7 @@ class ServidorRadio:
                                 "audio": {"rx": self._audio_disponible(), "tx": self._tx_disponible(), "fs": A.FS_RED, "codec": "pcm16", "trama_ms": A.TRAMA_MS},
                                 "cifrado": self.cifrado})
             log.info("Cliente conectado desde %s", ip)
+            self._anotar_conexion(ip)
             self._ultimo_ping = time.monotonic()
             self._ultimo_estado_json = ""                # que el cliente reciba el estado completo enseguida
             self._bucle_cliente(conn, lector)
