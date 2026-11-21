@@ -15,6 +15,7 @@ import os
 import socket
 import sys
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -87,6 +88,15 @@ def ultimo_emparejado(datos: Path = DIR_DATOS, maximo_s: int = 300) -> dict | No
         return None
 
 
+def estado_para_asistente(datos: Path = DIR_DATOS) -> dict:
+    """Lo que el asistente de RadioLog necesita saber de esta Raspberry sin que el usuario abra esta página: cómo está respecto a Tailscale (incluido el enlace para
+    autorizarla), si ya se emparejó alguna vez, si hay un emparejamiento abierto ahora y si la VPN está probada de punta a punta. Nada secreto (la clave nunca sale)."""
+    return {"tailscale": tailscale_estado(),
+            "enlazada": ultimo_emparejado(datos, maximo_s=10 ** 12) is not None,
+            "emparejando_s": emparejamiento_restante(datos),
+            "vpn_probada": bool(_leer_json(datos / "vpn_probada.json"))}
+
+
 def tailscale_estado() -> dict:
     """Cómo está esta Raspberry respecto a Tailscale (ver core/remoto/tailscale.py). Función aparte para poder sustituirla en las pruebas."""
     return TS.estado_propio()
@@ -110,7 +120,7 @@ def pasos_pagina(estado: dict, ts: dict, enlazada: bool, vpn_probada: dict | Non
 def _cuerpo_enlazar(emparejar_restante: int) -> str:
     if emparejar_restante > 0:
         return ('<div class="enlace ambar">⏳ Emparejando… quedan ' + str(int(emparejar_restante)) + ' segundos<br>'
-                '<small>Ahora, en RadioLog, pulse el botón verde <b>«Buscar en mi red local»</b>. Se rellena todo solo.</small></div>')
+                '<small>RadioLog recoge la clave solo (con el asistente de VPN abierto). Si no, pulse el botón verde <b>«Buscar en mi red local»</b>.</small></div>')
     return ('<ol class="mini"><li>En RadioLog: <b>Configuración → Radio / CAT</b> y elija <b>«Radio remota»</b>.</li>'
             '<li>Aquí: pulse el <b>botón azul</b>.</li>'
             '<li>En RadioLog: pulse el botón verde <b>«Buscar en mi red local»</b>. Se rellena todo solo.</li></ol>'
@@ -131,7 +141,7 @@ def _cuerpo_vpn(ts: dict) -> str:
 
 def _cuerpo_caducidad(ts: dict) -> str:
     e = html.escape
-    nombre = e(ts.get("nombre") or "radiolog")
+    nombre = e(ts.get("nombre_vpn") or ts.get("nombre") or "radiolog")
     fecha = f" Ahora caduca el <b>{e(ts['caduca'][:10])}</b>." if ts.get("caduca") else ""
     return ('<p>Si no se hace, a los 6 meses la VPN dejaría de funcionar y no se podría arreglar a distancia.' + fecha + '</p>'
             '<ol class="mini"><li>Pulse el botón de abajo e inicie sesión con su cuenta de Tailscale.</li>'
@@ -141,8 +151,8 @@ def _cuerpo_caducidad(ts: dict) -> str:
 
 
 def _cuerpo_prueba() -> str:
-    return ('<ol class="mini"><li>En RadioLog: <b>Configuración → Radio / CAT</b>, botón violeta <b>«Asistente de VPN»</b>.</li>'
-            '<li>Espere a que todos los pasos estén en verde (se guarda solo).</li>'
+    return ('<ol class="mini"><li>En RadioLog: <b>Configuración → Radio / CAT</b>, botón violeta <b>«Asistente: usar la radio desde fuera de casa»</b>.</li>'
+            '<li>Pulse <b>«Siguiente»</b> hasta el final (todo se guarda y se prueba solo).</li>'
             '<li>Pulse <b>«Conectar»</b> en RadioLog una vez.</li></ol>'
             '<p class="peq">Con esto la Raspberry comprueba que RadioLog llega por la VPN, y se marcará «lista para llevar».</p>')
 
@@ -160,15 +170,31 @@ def _linea_hecha(p: dict, ts: dict, emparejado: dict | None) -> str:
     return "Probada desde RadioLog por la VPN"
 
 
-def _bloque_pasos(estado: dict, ts: dict, enlazada: bool, vpn_probada: dict | None, emparejar_restante: int, emparejado: dict | None) -> str:
+def paso_ahora(pasos: list[dict], foco: str = "", emparejado: dict | None = None) -> int | None:
+    """Cuál de los pasos se enseña grande («AHORA»): el primero que falta, salvo que quien abre la página pida otro con ?paso=… (el asistente de RadioLog manda a
+    «vpn» para unir la Raspberry a Tailscale, o a «enlazar» para volver a emparejar). Si el paso pedido ya está hecho, se sigue con el siguiente que falte
+    (así, tras unirla a Tailscale, toca la caducidad); «enlazar» se puede repetir (reemparejar) mientras no se acabe de enlazar."""
+    primero = next((i for i, p in enumerate(pasos) if not p["hecho"]), None)
+    ids = [p["id"] for p in pasos]
+    if foco not in ids:
+        return primero
+    i = ids.index(foco)
+    if not pasos[i]["hecho"] or (foco == "enlazar" and not emparejado):
+        return i
+    siguiente = next((k for k in range(i + 1, len(pasos)) if not pasos[k]["hecho"]), None)
+    return siguiente if siguiente is not None else primero
+
+
+def _bloque_pasos(estado: dict, ts: dict, enlazada: bool, vpn_probada: dict | None, emparejar_restante: int, emparejado: dict | None, foco: str = "") -> str:
     """Todo lo que el usuario tiene que hacer, como una lista de pasos: el que toca AHORA, grande y con su botón; los hechos, en una línea verde; los que faltan, en gris."""
     pasos = pasos_pagina(estado, ts, enlazada, vpn_probada)
-    ahora = next((i for i, p in enumerate(pasos) if not p["hecho"]), None)
+    ahora = paso_ahora(pasos, foco, emparejado)
     total = len(pasos)
     hechos = sum(1 for p in pasos if p["hecho"])
     cuerpos = {"enlazar": lambda: _cuerpo_enlazar(emparejar_restante), "vpn": lambda: _cuerpo_vpn(ts), "caducidad": lambda: _cuerpo_caducidad(ts),
                "prueba": _cuerpo_prueba}
-    sal = []
+    sal = ['<div class="sugerencia">💡 Lo más fácil: en RadioLog, <b>Configuración → Radio / CAT → «Radio remota» → botón violeta «Asistente: usar la radio desde fuera de casa»</b> '
+           'hace todos estos pasos por usted. Esta página sirve para ver cómo va y como ayuda si algo falla.</div>']
     if emparejado:
         sal.append(f'<div class="enlace verde">✔ ENLAZADO<br><small>Emparejado con el equipo {html.escape(str(emparejado.get("ip", "")))}. '
                    f'Ya puede cerrar esta página y conectar en RadioLog.</small></div>')
@@ -188,11 +214,11 @@ def _bloque_pasos(estado: dict, ts: dict, enlazada: bool, vpn_probada: dict | No
             fuera_marcado = True
             nota = "✔ Ya puede usar la radio desde su casa." if pasos[0]["hecho"] else "Lo siguiente es solo para usarla desde fuera de casa."
             sal.append(f'</ol><div class="sep">{nota}<br><small>Para usarla desde otro sitio, siga:</small></div><ol class="pasos" start="{i + 1}">')
-        if p["hecho"]:
-            sal.append(f'<li class="paso hecho">✔ {_linea_hecha(p, ts, emparejado)}</li>')
-        elif i == ahora:
+        if i == ahora:
             sal.append(f'<li class="paso ahora"><div class="cab"><span class="tag">AHORA</span> {html.escape(p["titulo"])}</div>'
                        f'<div class="cuerpo">{cuerpos[p["id"]]()}</div></li>')
+        elif p["hecho"]:
+            sal.append(f'<li class="paso hecho">✔ {_linea_hecha(p, ts, emparejado)}</li>')
         else:
             sal.append(f'<li class="paso despues">{html.escape(p["titulo"])} <small>· después</small></li>')
     sal.append("</ol>")
@@ -200,9 +226,9 @@ def _bloque_pasos(estado: dict, ts: dict, enlazada: bool, vpn_probada: dict | No
 
 
 def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante: int = 0, emparejado: dict | None = None,
-           tailscale: dict | None = None, vpn_probada: dict | None = None, enlazada: bool = False) -> str:
+           tailscale: dict | None = None, vpn_probada: dict | None = None, enlazada: bool = False, foco: str = "") -> str:
     """El HTML de la página (autocontenido, se refresca solo): el estado de la radio y, debajo, la lista de pasos con el que toca ahora bien grande.
-    `enlazada`: ya se emparejó alguna vez con un RadioLog (aunque hace rato)."""
+    `enlazada`: ya se emparejó alguna vez con un RadioLog (aunque hace rato). `foco`: el paso que se quiere ver grande (?paso=vpn / ?paso=enlazar)."""
     e = html.escape
     fondo, texto, icono = _COLOR.get(estado.get("estado", ""), _COLOR["sin_radio"])
     listo = estado.get("estado") == "listo"
@@ -218,7 +244,7 @@ def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante:
     datos = ""
     if en_marcha:
         clave = e(estado.get("clave", ""))
-        datos = _bloque_pasos(estado, tailscale or {"instalado": False}, bool(enlazada or emparejado), vpn_probada, emparejar_restante, emparejado)
+        datos = _bloque_pasos(estado, tailscale or {"instalado": False}, bool(enlazada or emparejado), vpn_probada, emparejar_restante, emparejado, foco)
         datos += f"""
 <details class="caja">
  <summary>Prefiero teclear los datos a mano</summary>
@@ -241,6 +267,7 @@ def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante:
  table{{width:100%;border-collapse:collapse;margin-top:10px}} td{{padding:10px 6px;border-bottom:1px solid #334155;font-size:24px}} td:first-child{{color:#94a3b8;width:34%}}
  .peq,small{{color:#94a3b8;font-size:16px}} button{{font-size:18px;padding:6px 14px;margin-left:10px}}
  #clave{{font-family:Consolas,monospace;letter-spacing:1px}}
+ .sugerencia{{background:#1e3a5f;color:#dbeafe;border-radius:12px;padding:12px 16px;margin:12px 0 4px;font-size:19px}}
  .progreso{{font-size:21px;color:#cbd5e1;margin:14px 0 6px}} .barra{{height:12px;background:#334155;border-radius:6px;overflow:hidden;margin-top:6px}}
  .barra i{{display:block;height:100%;background:#22c55e}}
  ol.pasos{{list-style:none;padding:0;margin:0}} .paso{{border-radius:14px;margin:12px 0;padding:14px 18px}}
@@ -268,13 +295,15 @@ class _Manejador(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?")[0] in ("/", "/index.html"):
+            foco = (urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("paso") or [""])[0]
             enlazada = ultimo_emparejado(self.datos, maximo_s=10 ** 12) is not None            # ¿se emparejó alguna vez, aunque hace rato?
             cuerpo = pagina(leer_estado(self.datos), socket.gethostname(), ips_locales(), emparejamiento_restante(self.datos), ultimo_emparejado(self.datos),
-                            tailscale_estado(), _leer_json(self.datos / "vpn_probada.json"), enlazada).encode("utf-8")
+                            tailscale_estado(), _leer_json(self.datos / "vpn_probada.json"), enlazada, foco).encode("utf-8")
             tipo = "text/html; charset=utf-8"
         elif self.path.split("?")[0] == "/estado.json":
             e = leer_estado(self.datos)
             e.pop("clave", None)                           # la clave solo está en la página, no en el JSON
+            e.update(estado_para_asistente(self.datos))
             cuerpo, tipo = json.dumps(e, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8"
         else:
             self.send_error(404)
@@ -293,10 +322,12 @@ class _Manejador(BaseHTTPRequestHandler):
             return
         if ruta == "/tailscale/conectar":
             TS.iniciar_union(socket.gethostname().split(".")[0] or "radiolog", fichero_salida=str(self.datos / "tailscale_up.log"))
+            vuelta = "/?paso=vpn"                          # que la página siga en ese paso (si no, volvería al primero)
         else:
             abrir_emparejamiento(self.datos)
+            vuelta = "/?paso=enlazar"
         self.send_response(303)                            # de vuelta a la página, que ya dice «Emparejando…»
-        self.send_header("Location", "/")
+        self.send_header("Location", vuelta)
         self.send_header("Content-Length", "0")
         self.end_headers()
 

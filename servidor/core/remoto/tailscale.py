@@ -75,10 +75,11 @@ def direcciones_para_buscar(**kw) -> list[str]:
 # ── la Raspberry: ¿está unida a la VPN? y empezar a unirla ─────────────────────────────────────────────────────────────────
 
 def estado_propio(ejecutar: Optional[Callable[[str], str]] = None, programa: Optional[str] = None) -> dict:
-    """Cómo está ESTE equipo respecto a Tailscale: {instalado, estado, ip, nombre, url_login, caduca}.
+    """Cómo está ESTE equipo respecto a Tailscale: {instalado, estado, ip, nombre, nombre_vpn, url_login, caduca}. `nombre_vpn` = cómo se llama en la lista de equipos de la
+    cuenta (si ya había otro «radiolog», Tailscale le pone «radiolog-1»; `nombre` es el del sistema y no cambia).
     `estado` es el de Tailscale («Running» = unida y conectada, «NeedsLogin» = falta iniciar sesión, «Stopped»…); `url_login` es el enlace para autorizarla con la cuenta
     (aparece mientras se está uniendo); `caduca` es la fecha en que la clave de ESTE equipo caduca ('' si la caducidad está desactivada: lo que se quiere en una estación lejana)."""
-    base = {"instalado": False, "estado": "", "ip": "", "nombre": "", "url_login": "", "caduca": ""}
+    base = {"instalado": False, "estado": "", "ip": "", "nombre": "", "nombre_vpn": "", "url_login": "", "caduca": ""}
     try:
         programa = programa or encontrar_programa()
         if not programa:
@@ -88,6 +89,7 @@ def estado_propio(ejecutar: Optional[Callable[[str], str]] = None, programa: Opt
         if not isinstance(datos, dict):
             return base
         yo = datos.get("Self") or {}
+        base["nombre_vpn"] = str(yo.get("DNSName") or "").split(".")[0]
         ips = [i for i in (yo.get("TailscaleIPs") or []) if es_direccion_tailscale(i)]
         caduca = str(yo.get("KeyExpiry") or "")
         if caduca.startswith("0001-"):                           # «fecha cero» de Go = sin caducidad

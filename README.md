@@ -17,14 +17,14 @@ Imagen lista para grabar: el usuario la graba en una tarjeta SD o un SSD, la met
 2. Si usa **Wi-Fi** y no cable: abrir en el ordenador la unidad que aparece, editar `radiolog-wifi.txt` (nombre y contraseña de su Wi-Fi) y guardar. Con cable de red, no hace falta nada.
 3. Meter la tarjeta en la Raspberry, conectar la radio por USB, el cable de red (si no usa Wi-Fi) y la corriente.
 4. Esperar un par de minutos (el primer arranque es el más lento) y abrir `http://radiolog.local` en el ordenador o el móvil.
-5. En RadioLog: **Configuración → Radio / CAT → Método «Radio remota»**, pulsar **«Buscar en mi red»** (RadioLog encuentra solo la Raspberry y rellena la dirección y el puerto) y escribir la **clave** que dice la página. Si no la encuentra, la página también da la dirección y el puerto para escribirlos a mano.
+5. En RadioLog: **Configuración → Radio / CAT → Método «Radio remota»** y pulsar el botón violeta **«Asistente: usar la radio desde fuera de casa»**. Es un asistente de «Siguiente, Siguiente»: encuentra solo la Raspberry, instala y configura Tailscale (la VPN gratuita), enlaza RadioLog con la Raspberry sin teclear ninguna clave, guarda la configuración y prueba la conexión por la VPN. Lo único que hace el usuario son tres clics en el navegador (iniciar sesión en Tailscale en el ordenador, autorizar la Raspberry y desactivar la caducidad de su clave) y pulsar «Siguiente». Para usarla solo en casa basta pulsar **«Buscar en mi red local»** en esa misma tarjeta; si no la encuentra, la página de la Raspberry también da la dirección y el puerto para escribirlos a mano.
 
 ## Si la Raspberry está lejos (y se enciende a distancia)
 
 El caso típico: la radio y la Raspberry en otro sitio, sin pantalla ni nadie, y el usuario las enciende por control remoto (por ejemplo con enchufes que se manejan desde el móvil).
 
-1. **Una sola vez**, cuando haya alguien junto a la Raspberry (o por VPN): hacer la conexión con RadioLog (botón «Emparejar» de la página `http://radiolog.local` y «Buscar en mi red» en RadioLog). RadioLog guarda la dirección y la clave.
-2. En RadioLog, en Radio / CAT, marcar **«Conectar CAT al arrancar»**. Para estar fuera de casa, la dirección tiene que ser alcanzable desde fuera (una VPN como Tailscale: se pone su dirección en vez de `radiolog.local`).
+1. **Una sola vez**, con la Raspberry en casa (o ya unida a la VPN): pasar el **asistente** de RadioLog (Configuración → Radio / CAT → Radio remota → «Asistente: usar la radio desde fuera de casa»). Deja la Raspberry unida a Tailscale, enlazada con RadioLog, con la dirección de la VPN guardada y la conexión probada por la VPN; la página `http://radiolog.local` lo confirma con **«LISTA PARA LLEVAR»**.
+2. En RadioLog, en Radio / CAT, marcar **«Conectar CAT al arrancar»**. La dirección que deja guardada el asistente es la de la VPN, que sirve igual en casa que lejos.
 3. A partir de ahí: se enciende la Raspberry y la radio (en cualquier orden) y RadioLog **conecta solo**. Mientras tanto muestra «ESPERANDO AL SERVIDOR…» (la Raspberry aún arranca, tarda alrededor de un minuto) y luego «ESPERANDO A LA RADIO…» (el servidor ya está, falta encender la radio). No sale ninguna ventana de error, y se puede cancelar con el botón.
 4. Si se va la luz o se apaga algo, vuelve a esperar y reconecta cuando regrese.
 
