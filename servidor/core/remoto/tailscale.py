@@ -99,6 +99,36 @@ def estado_propio(ejecutar: Optional[Callable[[str], str]] = None, programa: Opt
     return base
 
 
+def estado_red(ejecutar: Optional[Callable[[str], str]] = None, programa: Optional[str] = None) -> dict:
+    """Foto de Tailscale en ESTE equipo para el asistente de VPN: {instalado, estado, url_login, nombre, pares}.
+    `pares` = los otros equipos de la cuenta: [{nombre, ip, en_linea, caduca}] (`caduca` = fecha de caducidad de su clave, '' si no caduca). Nunca lanza excepciones."""
+    base = {"instalado": False, "estado": "", "url_login": "", "nombre": "", "pares": []}
+    try:
+        programa = programa or encontrar_programa()
+        if not programa:
+            return base
+        base["instalado"] = True
+        datos = json.loads((ejecutar or _ejecutar)(programa))
+        if not isinstance(datos, dict):
+            return base
+        base.update(estado=str(datos.get("BackendState") or ""), url_login=str(datos.get("AuthURL") or ""),
+                    nombre=str((datos.get("Self") or {}).get("HostName") or ""))
+        for nodo in (datos.get("Peer") or {}).values():
+            if not isinstance(nodo, dict):
+                continue
+            ips = [i for i in (nodo.get("TailscaleIPs") or []) if es_direccion_tailscale(i)]
+            caduca = str(nodo.get("KeyExpiry") or "")
+            if caduca.startswith("0001-"):
+                caduca = ""
+            if nodo.get("Expired") and not caduca:
+                caduca = "caducada"
+            base["pares"].append({"nombre": str(nodo.get("HostName") or nodo.get("DNSName") or ""), "ip": ips[0] if ips else "",
+                                  "en_linea": bool(nodo.get("Online")), "caduca": caduca})
+    except Exception:
+        pass
+    return base
+
+
 _proceso_union = None
 
 

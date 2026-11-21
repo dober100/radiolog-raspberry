@@ -158,21 +158,25 @@ def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante:
     datos = ""
     if en_marcha:
         clave = e(estado.get("clave", ""))
+        # Tres estados del mismo sitio, con colores distintos para que se vea de un vistazo: azul = «pulse para enlazar», ámbar parpadeante = esperando a RadioLog,
+        # verde = enlazado. Solo parpadea el azul (es el que pide que se pulse).
         if emparejado:
-            accion = f'<div class="ok">✔ Emparejado con el equipo {e(str(emparejado.get("ip", "")))}. Ya puede cerrar esta página y conectar en RadioLog.</div>'
+            accion = (f'<div class="enlace verde">✔ ENLAZADO<br><small>Emparejado con el equipo {e(str(emparejado.get("ip", "")))}. '
+                      f'Ya puede cerrar esta página y conectar en RadioLog.</small></div>')
         elif emparejar_restante > 0:
-            accion = (f'<div class="espera">Emparejando… quedan {int(emparejar_restante)} segundos.<br>'
-                      f'Ahora, en RadioLog, pulse <b>«Buscar en mi red»</b>.</div>')
+            accion = (f'<div class="enlace ambar">⏳ Emparejando… quedan {int(emparejar_restante)} segundos<br>'
+                      f'<small>RadioLog recoge la clave solo. Si no, pulse <b>«Buscar en mi red local»</b> en RadioLog.</small></div>')
         else:
-            accion = ('<form method="post" action="/emparejar"><button class="grande" type="submit">Emparejar con RadioLog</button></form>'
-                      '<p class="peq">Después, en el plazo de 2 minutos, pulse «Buscar en mi red» en RadioLog.</p>')
+            accion = ('<form method="post" action="/emparejar"><button class="enlace azul parpadeo" type="submit">Emparejar con RadioLog<br>'
+                      '<small>Pulse aquí para enlazar</small></button></form>'
+                      '<p class="peq">Después, en el plazo de 2 minutos, RadioLog recoge la clave (o pulse «Buscar en mi red local» en RadioLog).</p>')
         datos = f"""
 <div class="caja">
  <h2>Conectar RadioLog (sin teclear la clave)</h2>
  <ol class="pasos">
   <li>En RadioLog: <b>Configuración → Radio / CAT → Método: Radio remota</b>.</li>
   <li>Aquí: pulse <b>Emparejar con RadioLog</b>.</li>
-  <li>En RadioLog: pulse <b>«Buscar en mi red»</b>. Se rellena todo solo.</li>
+  <li>En RadioLog: pulse <b>«Buscar en mi red local»</b>. Se rellena todo solo.</li>
  </ol>
  {accion}
 </div>
@@ -188,7 +192,7 @@ def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante:
     datos += _bloque_vpn(estado, tailscale or {"instalado": False}, vpn_probada)
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="5"><title>RadioLog · Servidor de radio</title>
+<meta http-equiv="refresh" content="{2 if emparejar_restante > 0 else 5}"><title>RadioLog · Servidor de radio</title>
 <style>
  body{{font-family:system-ui,Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:18px;font-size:20px}}
  h1{{font-size:26px;margin:0 0 14px}} h2{{font-size:22px;margin:0 0 6px}}
@@ -202,6 +206,11 @@ def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante:
  .lista li.si{{color:#bbf7d0}} .lista li.no{{color:#fde68a}}
  .peq,small{{color:#94a3b8;font-size:16px}} button{{font-size:18px;padding:6px 14px;margin-left:10px}}
  button.grande{{font-size:24px;padding:14px 24px;margin:6px 0;background:#16a34a;color:#fff;border:0;border-radius:10px}}
+ .enlace{{display:block;width:100%;box-sizing:border-box;text-align:center;font-size:26px;font-weight:bold;padding:18px 20px;margin:8px 0;border:0;border-radius:12px;color:#fff}}
+ .enlace small{{display:block;font-size:17px;font-weight:normal;margin-top:4px;color:inherit;opacity:.92}}
+ button.enlace{{margin-left:0;cursor:pointer}}
+ .azul{{background:#2563eb}} .ambar{{background:#b45309;color:#fef3c7}} .verde{{background:#15803d;color:#dcfce7}}
+ .parpadeo{{animation:lat 1.2s ease-in-out infinite}} @keyframes lat{{50%{{opacity:.55}}}}
  #clave{{font-family:Consolas,monospace;letter-spacing:1px}}
 </style></head><body>
 <h1>RadioLog · Servidor de radio</h1>
