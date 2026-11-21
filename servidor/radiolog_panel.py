@@ -92,57 +92,117 @@ def tailscale_estado() -> dict:
     return TS.estado_propio()
 
 
-def lista_para_llevar(estado: dict, ts: dict, vpn_probada: dict | None) -> list[dict]:
-    """Lo que hay que comprobar antes de llevarse la Raspberry lejos. Cada punto: {ok, texto, falta} (`falta`: qué hacer si no está). Todos en verde = «lista para llevar»."""
+URL_CONSOLA_TAILSCALE = "https://login.tailscale.com/admin/machines"
+
+
+def pasos_pagina(estado: dict, ts: dict, enlazada: bool, vpn_probada: dict | None) -> list[dict]:
+    """Los pasos que hay que dar, EN ORDEN, y cuáles están ya hechos: {id, titulo, hecho, fuera}. `fuera` = solo hace falta para usar la radio desde fuera de casa.
+    El primero que no está hecho es el que la página enseña grande («AHORA»)."""
     corriendo = ts.get("estado") == "Running"
-    puntos = [{"ok": estado.get("estado") == "listo", "texto": "La radio está detectada",
-               "falta": "Encienda la radio y compruebe el cable USB a la Raspberry."}]
-    if not ts.get("instalado"):
-        puntos.append({"ok": False, "texto": "Tailscale (la VPN) está instalado en esta Raspberry", "falta": "Esta imagen no lo trae: hace falta una imagen más nueva."})
-        return puntos
-    nombre = f" como «{ts['nombre']}» ({ts['ip']})" if corriendo and ts.get("ip") else ""
-    puntos.append({"ok": corriendo, "texto": "La Raspberry está unida a Tailscale" + nombre,
-                   "falta": "Pulse «Conectar a Tailscale» y autorice el enlace con su cuenta."})
-    sin_caducidad = corriendo and not ts.get("caduca")
-    puntos.append({"ok": sin_caducidad, "texto": "La clave de Tailscale de esta Raspberry no caduca",
-                   "falta": ("Entre en login.tailscale.com → Machines, busque esta Raspberry, menú «⋯» → «Disable key expiry». Si no, a los 6 meses la VPN dejaría de funcionar "
-                             "y no se podría arreglar a distancia." + (f" Caduca el {ts['caduca'][:10]}." if ts.get("caduca") else ""))})
-    puntos.append({"ok": bool(vpn_probada), "texto": "Un RadioLog se ha conectado a través de la VPN",
-                   "falta": "En RadioLog ponga como dirección la de la VPN (la que empieza por 100.) en lugar de la de casa, pida la clave y conecte una vez."})
-    return puntos
+    return [
+        {"id": "enlazar", "titulo": "Enlazar la Raspberry con RadioLog", "hecho": bool(enlazada), "fuera": False},
+        {"id": "vpn", "titulo": "Unir la Raspberry a Tailscale (la VPN)", "hecho": corriendo, "fuera": True},
+        {"id": "caducidad", "titulo": "Que la clave de la VPN no caduque", "hecho": corriendo and not ts.get("caduca"), "fuera": True},
+        {"id": "prueba", "titulo": "Probar desde RadioLog por la VPN", "hecho": bool(vpn_probada), "fuera": True},
+    ]
 
 
-def _bloque_vpn(estado: dict, ts: dict, vpn_probada: dict | None) -> str:
-    """La tarjeta de la VPN (Tailscale) y la lista «lista para llevar». Vacío si el servidor aún no ha arrancado."""
+def _cuerpo_enlazar(emparejar_restante: int) -> str:
+    if emparejar_restante > 0:
+        return ('<div class="enlace ambar">⏳ Emparejando… quedan ' + str(int(emparejar_restante)) + ' segundos<br>'
+                '<small>Ahora, en RadioLog, pulse el botón verde <b>«Buscar en mi red local»</b>. Se rellena todo solo.</small></div>')
+    return ('<ol class="mini"><li>En RadioLog: <b>Configuración → Radio / CAT</b> y elija <b>«Radio remota»</b>.</li>'
+            '<li>Aquí: pulse el <b>botón azul</b>.</li>'
+            '<li>En RadioLog: pulse el botón verde <b>«Buscar en mi red local»</b>. Se rellena todo solo.</li></ol>'
+            '<form method="post" action="/emparejar"><button class="enlace azul parpadeo" type="submit">Emparejar con RadioLog<br>'
+            '<small>Pulse aquí para enlazar</small></button></form>')
+
+
+def _cuerpo_vpn(ts: dict) -> str:
     e = html.escape
-    if estado.get("estado") not in ("listo", "sin_radio", "sin_soporte"):
-        return ""
-    if ts.get("instalado"):
-        if ts.get("estado") == "Running":
-            conectar = f'<div class="ok">✔ Unida a Tailscale. Dirección en la VPN: <b>{e(ts.get("ip", ""))}</b></div>'
-        elif ts.get("url_login"):
-            conectar = ('<div class="espera">Abra este enlace <b>en su ordenador o móvil</b> e inicie sesión con su cuenta de Tailscale:<br>'
-                        f'<a href="{e(ts["url_login"])}" target="_blank" style="color:#fde68a;word-break:break-all">{e(ts["url_login"])}</a></div>')
+    if not ts.get("instalado"):
+        return '<div class="enlace ambar">Esta imagen no trae Tailscale: hace falta una imagen más nueva.</div>'
+    if ts.get("url_login"):
+        return ('<div class="enlace ambar">Abra este enlace <b>en su ordenador o móvil</b> e inicie sesión con su cuenta de Tailscale:<br>'
+                f'<a href="{e(ts["url_login"])}" target="_blank" style="color:#fef3c7;word-break:break-all">{e(ts["url_login"])}</a></div>')
+    return ('<p>Esto solo hace falta para usar la radio <b>fuera de casa</b>. Necesita una cuenta gratuita de Tailscale.</p>'
+            '<form method="post" action="/tailscale/conectar"><button class="enlace azul" type="submit">Conectar a Tailscale</button></form>')
+
+
+def _cuerpo_caducidad(ts: dict) -> str:
+    e = html.escape
+    nombre = e(ts.get("nombre") or "radiolog")
+    fecha = f" Ahora caduca el <b>{e(ts['caduca'][:10])}</b>." if ts.get("caduca") else ""
+    return ('<p>Si no se hace, a los 6 meses la VPN dejaría de funcionar y no se podría arreglar a distancia.' + fecha + '</p>'
+            '<ol class="mini"><li>Pulse el botón de abajo e inicie sesión con su cuenta de Tailscale.</li>'
+            f'<li>Busque «<b>{nombre}</b>» en la lista.</li>'
+            '<li>Pulse los tres puntos <b>⋯</b> y elija <b>«Disable key expiry»</b>.</li></ol>'
+            f'<a class="enlace azul" href="{URL_CONSOLA_TAILSCALE}" target="_blank" style="text-decoration:none">Abrir la consola de Tailscale</a>')
+
+
+def _cuerpo_prueba() -> str:
+    return ('<ol class="mini"><li>En RadioLog: <b>Configuración → Radio / CAT</b>, botón violeta <b>«Asistente de VPN»</b>.</li>'
+            '<li>Espere a que todos los pasos estén en verde (se guarda solo).</li>'
+            '<li>Pulse <b>«Conectar»</b> en RadioLog una vez.</li></ol>'
+            '<p class="peq">Con esto la Raspberry comprueba que RadioLog llega por la VPN, y se marcará «lista para llevar».</p>')
+
+
+def _linea_hecha(p: dict, ts: dict, emparejado: dict | None) -> str:
+    e = html.escape
+    if p["id"] == "enlazar":
+        extra = f" (equipo {e(str(emparejado.get('ip', '')))})" if emparejado else ""
+        return "Enlazada con RadioLog" + extra
+    if p["id"] == "vpn":
+        nombre = f" como «{e(ts['nombre'])}» ({e(ts['ip'])})" if ts.get("nombre") and ts.get("ip") else ""
+        return "Unida a Tailscale" + nombre
+    if p["id"] == "caducidad":
+        return "La clave de la VPN no caduca"
+    return "Probada desde RadioLog por la VPN"
+
+
+def _bloque_pasos(estado: dict, ts: dict, enlazada: bool, vpn_probada: dict | None, emparejar_restante: int, emparejado: dict | None) -> str:
+    """Todo lo que el usuario tiene que hacer, como una lista de pasos: el que toca AHORA, grande y con su botón; los hechos, en una línea verde; los que faltan, en gris."""
+    pasos = pasos_pagina(estado, ts, enlazada, vpn_probada)
+    ahora = next((i for i, p in enumerate(pasos) if not p["hecho"]), None)
+    total = len(pasos)
+    hechos = sum(1 for p in pasos if p["hecho"])
+    cuerpos = {"enlazar": lambda: _cuerpo_enlazar(emparejar_restante), "vpn": lambda: _cuerpo_vpn(ts), "caducidad": lambda: _cuerpo_caducidad(ts),
+               "prueba": _cuerpo_prueba}
+    sal = []
+    if emparejado:
+        sal.append(f'<div class="enlace verde">✔ ENLAZADO<br><small>Emparejado con el equipo {html.escape(str(emparejado.get("ip", "")))}. '
+                   f'Ya puede cerrar esta página y conectar en RadioLog.</small></div>')
+    if ahora is None:
+        if estado.get("estado") == "listo":
+            sal.append('<div class="enlace verde" style="font-size:30px">✔ LISTA PARA LLEVAR<br><small>Todo comprobado. Ya puede llevársela: la radio, el cable USB y '
+                       'el cable de audio, conectados a la Raspberry.</small></div>')
         else:
-            conectar = ('<form method="post" action="/tailscale/conectar"><button class="grande" type="submit">Conectar a Tailscale</button></form>'
-                        '<p class="peq">Solo hace falta si va a usar la radio desde fuera de casa. Necesita una cuenta gratuita de Tailscale.</p>')
-        vpn = f'<div class="caja"><h2>Acceso desde fuera de casa (VPN)</h2>{conectar}</div>'
+            sal.append('<div class="enlace ambar">Casi: falta que la radio esté conectada y encendida.</div>')
     else:
-        vpn = ""
-    puntos = lista_para_llevar(estado, ts, vpn_probada)
-    filas = "".join(f'<li class="{"si" if p["ok"] else "no"}">{"✔" if p["ok"] else "✖"} {e(p["texto"])}'
-                    + ("" if p["ok"] else f'<div class="peq">{e(p["falta"])}</div>') + "</li>" for p in puntos)
-    if all(p["ok"] for p in puntos):
-        cab = '<div class="ok" style="font-size:28px">✔ LISTA PARA LLEVAR</div>'
-    else:
-        primero = next(p for p in puntos if not p["ok"])
-        cab = f'<div class="espera" style="font-size:24px">AÚN NO: falta · {e(primero["texto"])}</div>'
-    return vpn + f'<div class="caja"><h2>Antes de llevarse la Raspberry lejos</h2>{cab}<ul class="lista">{filas}</ul></div>'
+        sal.append(f'<div class="progreso">Paso <b>{ahora + 1}</b> de {total}'
+                   f'<div class="barra"><i style="width:{int(100 * hechos / total)}%"></i></div></div>')
+    sal.append('<ol class="pasos">')
+    fuera_marcado = False
+    for i, p in enumerate(pasos):
+        if p["fuera"] and not fuera_marcado:
+            fuera_marcado = True
+            nota = "✔ Ya puede usar la radio desde su casa." if pasos[0]["hecho"] else "Lo siguiente es solo para usarla desde fuera de casa."
+            sal.append(f'</ol><div class="sep">{nota}<br><small>Para usarla desde otro sitio, siga:</small></div><ol class="pasos" start="{i + 1}">')
+        if p["hecho"]:
+            sal.append(f'<li class="paso hecho">✔ {_linea_hecha(p, ts, emparejado)}</li>')
+        elif i == ahora:
+            sal.append(f'<li class="paso ahora"><div class="cab"><span class="tag">AHORA</span> {html.escape(p["titulo"])}</div>'
+                       f'<div class="cuerpo">{cuerpos[p["id"]]()}</div></li>')
+        else:
+            sal.append(f'<li class="paso despues">{html.escape(p["titulo"])} <small>· después</small></li>')
+    sal.append("</ol>")
+    return "".join(sal)
 
 
 def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante: int = 0, emparejado: dict | None = None,
-           tailscale: dict | None = None, vpn_probada: dict | None = None) -> str:
-    """El HTML de la página (autocontenido, se refresca solo cada 5 segundos)."""
+           tailscale: dict | None = None, vpn_probada: dict | None = None, enlazada: bool = False) -> str:
+    """El HTML de la página (autocontenido, se refresca solo): el estado de la radio y, debajo, la lista de pasos con el que toca ahora bien grande.
+    `enlazada`: ya se emparejó alguna vez con un RadioLog (aunque hace rato)."""
     e = html.escape
     fondo, texto, icono = _COLOR.get(estado.get("estado", ""), _COLOR["sin_radio"])
     listo = estado.get("estado") == "listo"
@@ -158,28 +218,8 @@ def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante:
     datos = ""
     if en_marcha:
         clave = e(estado.get("clave", ""))
-        # Tres estados del mismo sitio, con colores distintos para que se vea de un vistazo: azul = «pulse para enlazar», ámbar parpadeante = esperando a RadioLog,
-        # verde = enlazado. Solo parpadea el azul (es el que pide que se pulse).
-        if emparejado:
-            accion = (f'<div class="enlace verde">✔ ENLAZADO<br><small>Emparejado con el equipo {e(str(emparejado.get("ip", "")))}. '
-                      f'Ya puede cerrar esta página y conectar en RadioLog.</small></div>')
-        elif emparejar_restante > 0:
-            accion = (f'<div class="enlace ambar">⏳ Emparejando… quedan {int(emparejar_restante)} segundos<br>'
-                      f'<small>RadioLog recoge la clave solo. Si no, pulse <b>«Buscar en mi red local»</b> en RadioLog.</small></div>')
-        else:
-            accion = ('<form method="post" action="/emparejar"><button class="enlace azul parpadeo" type="submit">Emparejar con RadioLog<br>'
-                      '<small>Pulse aquí para enlazar</small></button></form>'
-                      '<p class="peq">Después, en el plazo de 2 minutos, RadioLog recoge la clave (o pulse «Buscar en mi red local» en RadioLog).</p>')
-        datos = f"""
-<div class="caja">
- <h2>Conectar RadioLog (sin teclear la clave)</h2>
- <ol class="pasos">
-  <li>En RadioLog: <b>Configuración → Radio / CAT → Método: Radio remota</b>.</li>
-  <li>Aquí: pulse <b>Emparejar con RadioLog</b>.</li>
-  <li>En RadioLog: pulse <b>«Buscar en mi red local»</b>. Se rellena todo solo.</li>
- </ol>
- {accion}
-</div>
+        datos = _bloque_pasos(estado, tailscale or {"instalado": False}, bool(enlazada or emparejado), vpn_probada, emparejar_restante, emparejado)
+        datos += f"""
 <details class="caja">
  <summary>Prefiero teclear los datos a mano</summary>
  <table>
@@ -189,29 +229,32 @@ def pagina(estado: dict, nombre_equipo: str, ips: list[str], emparejar_restante:
  </table>
  <p class="peq">Si «{e(direccion)}» no funciona en su ordenador, use la dirección numérica: <b>{otras or 'sin red'}</b></p>
 </details>"""
-    datos += _bloque_vpn(estado, tailscale or {"instalado": False}, vpn_probada)
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{2 if emparejar_restante > 0 else 5}"><title>RadioLog · Servidor de radio</title>
 <style>
- body{{font-family:system-ui,Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:18px;font-size:20px}}
- h1{{font-size:26px;margin:0 0 14px}} h2{{font-size:22px;margin:0 0 6px}}
- .estado{{background:{fondo};color:{texto};border-radius:12px;padding:16px;font-size:24px;margin-bottom:16px}}
- .caja{{background:#1e293b;border-radius:12px;padding:16px;margin-top:16px}}
- .ok{{background:#14532d;color:#bbf7d0;border-radius:10px;padding:14px;font-size:22px}}
- .espera{{background:#78350f;color:#fde68a;border-radius:10px;padding:14px;font-size:22px}}
- .pasos{{padding-left:22px;line-height:1.5}} summary{{cursor:pointer;font-size:20px;color:#cbd5e1}}
- table{{width:100%;border-collapse:collapse;margin-top:10px}} td{{padding:10px 6px;border-bottom:1px solid #334155;font-size:26px}} td:first-child{{color:#94a3b8;width:34%}}
- .lista{{list-style:none;padding:0;margin:10px 0 0}} .lista li{{padding:8px 0;border-bottom:1px solid #334155;font-size:20px}}
- .lista li.si{{color:#bbf7d0}} .lista li.no{{color:#fde68a}}
+ body{{font-family:system-ui,Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:18px;font-size:21px;max-width:880px;margin-left:auto;margin-right:auto}}
+ h1{{font-size:28px;margin:0 0 14px}}
+ .estado{{background:{fondo};color:{texto};border-radius:12px;padding:16px;font-size:24px;margin-bottom:12px}}
+ .caja{{background:#1e293b;border-radius:12px;padding:16px;margin-top:20px}}
+ summary{{cursor:pointer;font-size:20px;color:#cbd5e1}}
+ table{{width:100%;border-collapse:collapse;margin-top:10px}} td{{padding:10px 6px;border-bottom:1px solid #334155;font-size:24px}} td:first-child{{color:#94a3b8;width:34%}}
  .peq,small{{color:#94a3b8;font-size:16px}} button{{font-size:18px;padding:6px 14px;margin-left:10px}}
- button.grande{{font-size:24px;padding:14px 24px;margin:6px 0;background:#16a34a;color:#fff;border:0;border-radius:10px}}
+ #clave{{font-family:Consolas,monospace;letter-spacing:1px}}
+ .progreso{{font-size:21px;color:#cbd5e1;margin:14px 0 6px}} .barra{{height:12px;background:#334155;border-radius:6px;overflow:hidden;margin-top:6px}}
+ .barra i{{display:block;height:100%;background:#22c55e}}
+ ol.pasos{{list-style:none;padding:0;margin:0}} .paso{{border-radius:14px;margin:12px 0;padding:14px 18px}}
+ .paso.hecho{{background:#14532d;color:#bbf7d0;font-size:20px}}
+ .paso.despues{{background:#1e293b;color:#94a3b8;font-size:20px}}
+ .paso.ahora{{background:#1e293b;border:3px solid #3b82f6;padding:18px 20px}}
+ .cab{{font-size:27px;font-weight:bold;margin-bottom:10px}} .tag{{background:#3b82f6;color:#fff;border-radius:8px;padding:2px 10px;font-size:20px;margin-right:6px}}
+ .sep{{text-align:center;color:#cbd5e1;font-size:20px;margin:22px 0 4px;padding-top:14px;border-top:2px dashed #475569}}
+ ol.mini{{padding-left:26px;line-height:1.6;font-size:22px;margin:8px 0 14px}}
  .enlace{{display:block;width:100%;box-sizing:border-box;text-align:center;font-size:26px;font-weight:bold;padding:18px 20px;margin:8px 0;border:0;border-radius:12px;color:#fff}}
  .enlace small{{display:block;font-size:17px;font-weight:normal;margin-top:4px;color:inherit;opacity:.92}}
  button.enlace{{margin-left:0;cursor:pointer}}
  .azul{{background:#2563eb}} .ambar{{background:#b45309;color:#fef3c7}} .verde{{background:#15803d;color:#dcfce7}}
  .parpadeo{{animation:lat 1.2s ease-in-out infinite}} @keyframes lat{{50%{{opacity:.55}}}}
- #clave{{font-family:Consolas,monospace;letter-spacing:1px}}
 </style></head><body>
 <h1>RadioLog · Servidor de radio</h1>
 <div class="estado">{icono} {e(estado.get('mensaje', ''))}</div>
@@ -225,8 +268,9 @@ class _Manejador(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?")[0] in ("/", "/index.html"):
+            enlazada = ultimo_emparejado(self.datos, maximo_s=10 ** 12) is not None            # ¿se emparejó alguna vez, aunque hace rato?
             cuerpo = pagina(leer_estado(self.datos), socket.gethostname(), ips_locales(), emparejamiento_restante(self.datos), ultimo_emparejado(self.datos),
-                            tailscale_estado(), _leer_json(self.datos / "vpn_probada.json")).encode("utf-8")
+                            tailscale_estado(), _leer_json(self.datos / "vpn_probada.json"), enlazada).encode("utf-8")
             tipo = "text/html; charset=utf-8"
         elif self.path.split("?")[0] == "/estado.json":
             e = leer_estado(self.datos)
