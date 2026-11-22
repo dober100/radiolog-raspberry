@@ -16,6 +16,14 @@
 # Clave propia en vez de la automática (mínimo 8 caracteres):
 # clave = mi-clave-segura
 
+# CW (telegrafía) por la red. DESACTIVADO por defecto: quite el # para activarlo.
+# La clave del CW usa una línea (DTR o RTS) de un puerto serie de la radio que NO sea el del CAT (en la FTDX10, el segundo puerto, el «Standard»).
+#   puerto_clave = auto            («auto» solo funciona con la FTDX10 y si se identifica sin dudas; si no, escriba el puerto: /dev/ttyUSB1)
+#   linea_clave = dtr              (dtr o rts: la misma que en RadioLog y la que tenga la radio en su menú «PC KEYING»)
+#   invertir_clave = no            (solo si la radio usa la clave invertida; RadioLog debe estar igual)
+# puerto_clave = auto
+# linea_clave = dtr
+
 # Puerto de red (por defecto 8765) y desde qué redes se acepta conectar:
 # puerto = 8765
 # redes_permitidas = 192.168.1.0/24

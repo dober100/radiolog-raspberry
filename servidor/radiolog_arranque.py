@@ -97,7 +97,9 @@ def preparar(datos: Path, ajustes_ruta: Path | None = None, buscar_audio=AC.busc
         puerto_red = PUERTO_RED
     cfg = {"modo": "fijo" if fijo else "auto", "modelo": ajustes.get("modelo", "").lower(), "puerto_serie": ajustes.get("puerto_serie", ""), "baudios": baudios,
            "audio_entrada": entrada or AUDIO_DE_FABRICA, "audio_salida": salida or AUDIO_DE_FABRICA, "puerto_red": puerto_red, "clave": clave,
-           "redes_permitidas": ajustes.get("redes_permitidas", ""), "estado": "arrancando", "mensaje": "Arrancando el servidor… un momento."}
+           "redes_permitidas": ajustes.get("redes_permitidas", ""), "puerto_clave": ajustes.get("puerto_clave", ""),
+           "linea_clave": ajustes.get("linea_clave", "dtr").lower(), "invertir_clave": ajustes.get("invertir_clave", "").lower() in ("1", "si", "sí", "true", "yes"),
+           "estado": "arrancando", "mensaje": "Arrancando el servidor… un momento."}
     escribir_estado(datos, cfg)
     return cfg
 
@@ -115,6 +117,10 @@ def orden_servidor(est: dict, datos: Path) -> list[str]:
         o += ["--audio-salida", est["audio_salida"]]
     if est.get("redes_permitidas"):
         o += ["--redes-permitidas", est["redes_permitidas"]]
+    if est.get("puerto_clave"):                                   # el CW por la red es opcional: solo con `puerto_clave = auto` (o una ruta) en radiolog.txt
+        o += ["--puerto-clave", est["puerto_clave"], "--linea-clave", est.get("linea_clave") or "dtr"]
+        if est.get("invertir_clave"):
+            o += ["--invertir-clave"]
     return o
 
 

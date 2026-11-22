@@ -98,6 +98,63 @@ def buscar_radio(puertos: Optional[list[str]] = None, baudios: tuple = BAUDIOS, 
     return None
 
 
+# ── puerto de la clave de CW ─────────────────────────────────────────────────────────────────────────────────────────
+# La FTDX10 muestra por USB DOS puertos del mismo dispositivo: el «Enhanced» (el del CAT, contesta a «ID;») y el «Standard» (PTT y clave por RTS/DTR). Solo en los
+# modelos de esta lista, y solo si el «otro puerto» se puede identificar SIN DUDA, se elige solo; en cualquier otro caso se pide configurarlo a mano.
+MODELOS_CON_CLAVE_AUTO = ("ftdx10",)
+
+
+def _ruta_usb(p) -> Optional[str]:
+    """El dispositivo USB físico de un puerto (su «location» sin el número de interfaz: «1-1.2:1.0» -> «1-1.2»), o None si no se sabe."""
+    loc = getattr(p, "location", None)
+    return str(loc).split(":")[0] if loc else None
+
+
+def puerto_clave_auto(puerto_cat: str, modelo: str, listar: Optional[Callable] = None) -> tuple[Optional[str], str]:
+    """(puerto, motivo): el puerto de la clave de CW de la radio que está en `puerto_cat`, o (None, por_qué_no). Solo se devuelve un puerto cuando es INEQUÍVOCO:
+    el modelo es de los que tienen su clave en el segundo puerto, y hay exactamente UN puerto más del mismo dispositivo USB (mismo fabricante, producto, número de
+    serie y conector físico). No se sondea nada: no se abre ningún puerto."""
+    modelo = str(modelo or "").lower()
+    if modelo not in MODELOS_CON_CLAVE_AUTO:
+        return None, f"con este modelo ({modelo or '?'}) el puerto de la clave no se elige solo: ponlo a mano"
+    try:
+        if listar is None:
+            from serial.tools import list_ports
+            listar = list_ports.comports
+        puertos = list(listar())
+    except Exception as exc:
+        return None, f"no se pueden listar los puertos serie ({exc})"
+    cat = next((p for p in puertos if str(getattr(p, "device", "")) == str(puerto_cat)), None)
+    if cat is None:
+        return None, f"no encuentro el puerto de la radio ({puerto_cat})"
+    vid, pid = getattr(cat, "vid", None), getattr(cat, "pid", None)
+    if vid is None or pid is None:
+        return None, "no se puede saber a qué dispositivo USB pertenece el puerto de la radio"
+    ruta, serie = _ruta_usb(cat), getattr(cat, "serial_number", None)
+    if ruta is None and not serie:
+        return None, "no se puede saber qué puertos son del mismo dispositivo USB"
+    iguales = []
+    for p in puertos:
+        if str(getattr(p, "device", "")) == str(puerto_cat):
+            continue
+        if getattr(p, "vid", None) != vid or getattr(p, "pid", None) != pid:
+            continue
+        ruta_p, serie_p = _ruta_usb(p), getattr(p, "serial_number", None)
+        if ruta is not None and ruta_p is not None:
+            if ruta_p != ruta:
+                continue
+        elif not serie or serie_p != serie:                  # sin ruta física, solo vale un número de serie idéntico y no vacío
+            continue
+        if serie and serie_p and serie_p != serie:
+            continue
+        iguales.append(str(p.device))
+    if not iguales:
+        return None, "la radio solo muestra un puerto USB: no hay otro para la clave"
+    if len(iguales) > 1:
+        return None, f"hay varios puertos candidatos ({', '.join(sorted(iguales))}): ponlo a mano"
+    return iguales[0], ""
+
+
 # ── audio ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 _PREFERIDAS = ("usb audio codec", "usb audio", "usb")
 _DESCARTAR = ("hdmi", "monitor", "bcm2835", "headphones")

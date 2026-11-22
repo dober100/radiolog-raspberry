@@ -1036,6 +1036,10 @@ class CatEngine:
     def __init__(self, backend: str = "", **kwargs):
         self.backend_key = backend
         self.backend = self._create_backend(backend, **kwargs)
+        self._receptores_audio_rx: dict = {}              # clave -> función que recibe el audio de la radio remota (ver suscribir_audio_rx)
+        self._lock_audio_rx = threading.Lock()
+        self._tx_dueno = ""                               # quién transmite por la radio remota ahora (ver reservar_tx)
+        self._lock_tx = threading.Lock()
         self._ultimo_poll_ts = 0.0
         self._barrido_hilo = None
         self._barrido_cancelar_ev = threading.Event()
@@ -1218,6 +1222,87 @@ class CatEngine:
     def poner_receptor_audio(self, funcion) -> None:
         if hasattr(self.backend, "on_audio"):
             self.backend.on_audio = funcion
+
+    # ── audio de recepción COMPARTIDO ───────────────────────────────────────────────────────────────────────────────────────
+    # Varias ventanas (Control de equipo, FT8/RTTY/CW Studio) pueden querer el audio de la radio remota a la vez. Cada una se apunta con su
+    # clave; el audio se reparte a todas y solo se le pide al servidor mientras haya alguna apuntada (la última en irse lo apaga).
+
+    def suscribir_audio_rx(self, clave: str, funcion) -> bool:
+        """Apunta `funcion(pcm16_8khz_mono)` al audio de recepción. Se puede repetir (también sirve para volver a pedirlo al servidor).
+        True si el servidor ha recibido la petición."""
+        if not hasattr(self.backend, "on_audio"):
+            return False
+        with self._lock_audio_rx:
+            self._receptores_audio_rx[str(clave)] = funcion
+        self.backend.on_audio = self._repartir_audio_rx
+        return bool(self.audio_rx(True))
+
+    def retirar_audio_rx(self, clave: str) -> None:
+        """Quita a `clave` del reparto; si era la última, deja de pedir el audio al servidor."""
+        with self._lock_audio_rx:
+            self._receptores_audio_rx.pop(str(clave), None)
+            vacio = not self._receptores_audio_rx
+        if vacio and hasattr(self.backend, "on_audio"):
+            try:
+                self.audio_rx(False)
+            except Exception:
+                pass
+            self.backend.on_audio = None
+
+    def receptores_audio_rx(self, prefijo: str = "") -> list:
+        """Claves de quienes están apuntados ahora (opcionalmente solo las que empiezan por `prefijo`)."""
+        with self._lock_audio_rx:
+            return [k for k in self._receptores_audio_rx if k.startswith(prefijo)]
+
+    # ── transmisión por la radio remota ─────────────────────────────────────────────────────────────────────────────────────
+    # Solo puede transmitir UNA ventana a la vez (un Studio, otro Studio o el micrófono del Control de equipo): quien quiere transmitir se apunta con
+    # `reservar_tx(clave)`; si ya hay otro, le dice quién. (El servidor lo vuelve a comprobar por su cuenta.)
+
+    def reservar_tx(self, clave: str) -> str:
+        """\"\" si `clave` queda como la ventana que transmite (o ya lo era); si no, la clave de quien transmite."""
+        with self._lock_tx:
+            if self._tx_dueno and self._tx_dueno != str(clave):
+                return self._tx_dueno
+            self._tx_dueno = str(clave)
+            return ""
+
+    def liberar_tx(self, clave: str) -> None:
+        with self._lock_tx:
+            if self._tx_dueno == str(clave):
+                self._tx_dueno = ""
+
+    def tx_ocupado_por(self) -> str:
+        with self._lock_tx:
+            return self._tx_dueno
+
+    def txd_disponible(self) -> bool:        return bool(getattr(self.backend, "txd_disponible", lambda: False)())
+    def txd_abrir(self, dueno, antes_ms, despues_ms, max_s):
+        return getattr(self.backend, "txd_abrir", lambda *a: (False, "Esta radio no admite transmitir modos digitales por la red"))(dueno, antes_ms, despues_ms, max_s)
+    def txd_enviar(self, **campos) -> bool:  return bool(getattr(self.backend, "txd_enviar", lambda **k: False)(**campos))
+    def poner_receptor_txd(self, funcion) -> None:
+        if hasattr(self.backend, "on_txd"):
+            self.backend.on_txd = funcion
+    def reloj_remoto(self):                  return getattr(self.backend, "reloj", None)
+    def cw_disponible(self) -> bool:         return bool(getattr(self.backend, "cw_disponible", lambda: False)())
+    def cw_info(self) -> dict:               return dict(getattr(self.backend, "cw_info", lambda: {})())
+    def cw_abrir(self, **parametros):
+        return getattr(self.backend, "cw_abrir", lambda **k: (False, "Esta radio no admite CW por la red"))(**parametros)
+    def cw_enviar(self, **campos) -> bool:   return bool(getattr(self.backend, "cw_enviar", lambda **k: False)(**campos))
+    def poner_receptor_cw(self, funcion) -> None:
+        if hasattr(self.backend, "on_cw"):
+            self.backend.on_cw = funcion
+    def latencia_remota_s(self) -> float:
+        ms = getattr(self.backend, "latencia_ms", None)
+        return float(ms) / 1000.0 if ms is not None else 0.0
+
+    def _repartir_audio_rx(self, pcm: bytes) -> None:
+        with self._lock_audio_rx:
+            funciones = list(self._receptores_audio_rx.values())
+        for f in funciones:
+            try:
+                f(pcm)
+            except Exception:
+                log.exception("Error al entregar el audio de recepción")
     def notch_disponible(self) -> bool:      return bool(getattr(getattr(self.backend, "state", None), "notch_ok", True))
     def get_vox(self) -> bool:                return self.backend.get_vox()
     def set_vox(self, on) -> None:            self.backend.set_vox(on)

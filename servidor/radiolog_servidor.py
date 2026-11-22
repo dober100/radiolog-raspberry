@@ -44,6 +44,10 @@ def main(argv=None) -> int:
     ap.add_argument("--clave-fichero", default="", help="fichero de texto con la clave")
     ap.add_argument("--audio-entrada", default="", help="tarjeta de sonido de la radio, por un trozo de su nombre (ej. \"USB AUDIO CODEC\"); sin esto no hay audio")
     ap.add_argument("--audio-salida", default="", help="tarjeta de sonido por la que se manda la voz a la radio (trozo de su nombre); sin esto no se puede transmitir audio")
+    ap.add_argument("--puerto-clave", default="", help="puerto serie de la CLAVE de CW (RTS/DTR de la radio; en la FTDX10, el «Standard COM Port»: NO el del CAT). «auto» lo elige solo, pero únicamente si se identifica sin "
+                    "dudas; si no, hay que ponerlo a mano. Sin esto, el CW por la red queda desactivado")
+    ap.add_argument("--linea-clave", choices=("dtr", "rts"), default="dtr", help="línea del puerto de clave que manipula la radio (por defecto dtr); RadioLog debe tener la misma")
+    ap.add_argument("--invertir-clave", action="store_true", help="la clave de la radio está invertida (reposo en alto); RadioLog debe tener lo mismo")
     ap.add_argument("--tx-pico", type=float, default=0.8, help="tope de amplitud del audio que se manda a la radio, de 0.05 a 1 (por defecto 0.8)")
     ap.add_argument("--tx-ganancia", type=float, default=1.0, help="ganancia del audio de transmisión en el servidor (por defecto 1)")
     ap.add_argument("--listar-audio", action="store_true", help="muestra las tarjetas de sonido que ve el sistema y sale")
@@ -100,7 +104,8 @@ def main(argv=None) -> int:
                         audio_salida=a.audio_salida or None, tx_pico=a.tx_pico, tx_ganancia=a.tx_ganancia,
                         cifrado=not a.sin_cifrar, carpeta_cert=Path(a.carpeta_cert) if a.carpeta_cert else Path.home() / ".radiolog-servidor",
                         redes_permitidas=[r for r in a.redes_permitidas.split(",") if r.strip()],
-                        emparejar_fichero=a.emparejar_fichero or None, buscar_radio=buscar, estado_radio_fichero=a.estado_radio_fichero or None)
+                        emparejar_fichero=a.emparejar_fichero or None, buscar_radio=buscar, estado_radio_fichero=a.estado_radio_fichero or None,
+                        puerto_clave=a.puerto_clave, linea_clave=a.linea_clave, invertir_clave=a.invertir_clave)
     srv.iniciar()
     if a.emparejar > 0:
         srv.abrir_emparejamiento(a.emparejar)

@@ -1067,7 +1067,7 @@
   "settings.appearance.light_soon_badge": "Coming soon",
   "settings.appearance.preset_desc_dark": "Flat neutral grey, OBS-style. Amber accent.",
   "settings.appearance.preset_desc_dark_blue": "RadioLog's original palette. Blue accent.",
-  "settings.appearance.preset_desc_light": "Light background, white card. Blue accent.",
+  "settings.appearance.preset_desc_light": "Lavender and mist blue with soft gradients. Blue accent.",
   "settings.appearance.preset_desc_night": "Deep navy blue with a cyan accent: bordered cards and rounded buttons.",
   "settings.appearance.preview_mono": "Monospaced:",
   "settings.appearance.preview_mono_sample": "14.074.000 · EA5YC · -12dB · 599 · JN00AA",
@@ -2610,5 +2610,8 @@
   "reloj.zulu": "Zulu",
   "reloj.local": "Local time",
   "reloj.tip": "right click: change",
-  "reloj.info": "The clock. Right-click the time to choose UTC (GMT), Zulu or local time. Hover over it to see the date. What you pick applies to every clock in the program."
+  "reloj.info": "The clock. Right-click the time to choose UTC (GMT), Zulu or local time. Hover over it to see the date. What you pick applies to every clock in the program.",
+  "studios.remoto.sufijo": " · via the remote radio",
+  "studios.remoto.ptt": "PTT: via the remote radio",
+  "cwwin.remote_short": "remote radio"
 }

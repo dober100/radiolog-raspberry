@@ -19,6 +19,7 @@ from core.cat_engine import CAP_SIMULATOR, CatBackendBase
 from core.remoto import certificado as C
 from core.remoto import protocolo as P
 from core.remoto.conexion import Conexion
+from core.remoto.reloj import EstimadorReloj
 
 log = logging.getLogger("radiolog.remoto.cliente")
 
@@ -53,6 +54,11 @@ class CatBackendRemoto(CatBackendBase):
         self._audio_pedido = False
         self._audio_n = 0
         self._tx_n = 0
+        # transmisión de modos digitales (ver core/tx_remoto.py): relojes sincronizados con el servidor y los mensajes «txd_*» que llegan de él
+        self.reloj = EstimadorReloj()
+        self.on_txd = None                 # función(mensaje) que recibe «txd_estado» y «txd_fin» de la transmisión digital en curso
+        self.on_cw = None                  # función(mensaje) que recibe «cw_car», «cw_fin», «cw_error» y «cw_cerrado» del CW remoto (ver core/cw_remoto.py)
+        self._txd_esperas: dict = {}       # id -> [evento, (ok, texto)]
         self.state.backend_name = f"Remoto ({self.host}:{self.port})"
 
     # ── conexión ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -65,6 +71,7 @@ class CatBackendRemoto(CatBackendBase):
         self._parar.clear()
         self._primer_estado.clear()
         self.latencia_ms = None
+        self.reloj.reiniciar()
         try:
             sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         except OSError as e:
@@ -206,8 +213,31 @@ class CatBackendRemoto(CatBackendBase):
         elif tipo == "pong":
             ts = m.get("ts")
             if isinstance(ts, (int, float)) and not isinstance(ts, bool):
-                rtt = max(0.0, min(60000.0, (time.monotonic() - float(ts)) * 1000.0))
+                ahora = time.monotonic()
+                rtt = max(0.0, min(60000.0, (ahora - float(ts)) * 1000.0))
                 self.latencia_ms = rtt if self.latencia_ms is None else 0.7 * self.latencia_ms + 0.3 * rtt
+                st = m.get("st")
+                if isinstance(st, (int, float)) and not isinstance(st, bool):
+                    self.reloj.medir(float(ts), ahora, float(st))
+        elif tipo in ("txd_resp", "cw_resp"):
+            espera = self._txd_esperas.get(m.get("id"))
+            if espera is not None:
+                espera[1] = (bool(m.get("ok")), str(m.get("msg", "")))
+                espera[0].set()
+        elif tipo in ("cw_car", "cw_fin", "cw_error", "cw_cerrado"):
+            cb = self.on_cw
+            if cb is not None:
+                try:
+                    cb(m)
+                except Exception:
+                    log.exception("Error al entregar un mensaje del CW remoto")
+        elif tipo in ("txd_estado", "txd_fin"):
+            cb = self.on_txd
+            if cb is not None:
+                try:
+                    cb(m)
+                except Exception:
+                    log.exception("Error al entregar el estado de la transmisión digital")
         elif tipo == "barrido":
             self._barrido_res = {k: v for k, v in m.items() if k != "t"}
         elif tipo == "audio":
@@ -259,6 +289,59 @@ class CatBackendRemoto(CatBackendBase):
         self._tx_n += 1
         return self._enviar({"t": "audio_tx", "n": self._tx_n, "d": base64.b64encode(pcm16).decode("ascii")})
 
+    # ── transmisión de modos digitales ────────────────────────────────────────────────────────────────────────────────────
+
+    def txd_disponible(self) -> bool:
+        """¿El servidor sabe transmitir modos digitales? (los antiguos no: hay que actualizarlos)."""
+        return bool(self.state.connected and self._audio_info.get("txd"))
+
+    def txd_abrir(self, dueno: str, antes_ms: float, despues_ms: float, max_s: float, espera_s: float = 3.0) -> tuple[bool, str]:
+        """Pide al servidor una transmisión digital (abre su salida de audio y la reserva). Espera su respuesta. (True, "") o (False, motivo)."""
+        self._id += 1
+        ident = self._id
+        espera = [threading.Event(), (False, "El servidor no ha contestado")]
+        self._txd_esperas[ident] = espera
+        try:
+            if not self._enviar({"t": "txd", "op": "abrir", "id": ident, "dueno": str(dueno)[:16], "antes_ms": float(antes_ms),
+                                 "despues_ms": float(despues_ms), "max_s": float(max_s)}):
+                return False, "Sin conexión con la radio remota"
+            espera[0].wait(espera_s)
+            return espera[1]
+        finally:
+            self._txd_esperas.pop(ident, None)
+
+    def txd_enviar(self, **campos) -> bool:
+        """Un mensaje de la transmisión digital (inicio, datos, fin, parar). Seguro desde cualquier hilo."""
+        return self._enviar({"t": "txd", **campos})
+
+    # ── CW remoto ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    def cw_disponible(self) -> bool:
+        """¿El servidor puede manipular CW? (tiene su puerto de clave identificado y abierto)."""
+        return bool(self.state.connected and self._audio_info.get("cw"))
+
+    def cw_info(self) -> dict:
+        """Lo que el servidor contó al conectar sobre el CW: `cw` (si hay), `cw_linea` y `cw_invertir` (lo físico del servidor) y `cw_motivo` (por qué no, si no hay)."""
+        return {k: self._audio_info.get(k) for k in ("cw", "cw_linea", "cw_invertir", "cw_motivo")}
+
+    def cw_abrir(self, espera_s: float = 3.0, **parametros) -> tuple[bool, str]:
+        """Abre el keyer del servidor con estos parámetros (wpm, peso, linea, invertir, ptt, ptt_antes_ms…). Espera su respuesta: (True, "") o (False, motivo)."""
+        self._id += 1
+        ident = self._id
+        espera = [threading.Event(), (False, "El servidor no ha contestado")]
+        self._txd_esperas[ident] = espera
+        try:
+            if not self._enviar({"t": "cw", "op": "abrir", "id": ident, **parametros}):
+                return False, "Sin conexión con la radio remota"
+            espera[0].wait(espera_s)
+            return espera[1]
+        finally:
+            self._txd_esperas.pop(ident, None)
+
+    def cw_enviar(self, **campos) -> bool:
+        """Un mensaje del CW (enviar, wpm, ptt, parar, cerrar). Seguro desde cualquier hilo."""
+        return self._enviar({"t": "cw", **campos})
+
     def audio_rx(self, on: bool) -> bool:
         """Pide al servidor que empiece (o pare) de mandar el audio de recepción."""
         if not on:
@@ -267,8 +350,10 @@ class CatBackendRemoto(CatBackendBase):
         return self._orden("audio_rx", bool(on))
 
     def _latido(self) -> None:
-        while not self._parar.wait(1.0):
-            if not self._enviar({"t": "ping", "ts": time.monotonic()}):
+        while True:
+            if not self._enviar({"t": "ping", "ts": time.monotonic()}):         # (el primero sale ya: así los relojes se sincronizan nada más conectar)
+                break
+            if self._parar.wait(1.0):
                 break
 
     # ── envío ────────────────────────────────────────────────────────────────────────────────────────────────────────────────

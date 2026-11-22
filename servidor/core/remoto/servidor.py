@@ -30,8 +30,28 @@ from core.remoto import certificado as C
 from core.remoto.conexion import Conexion
 from core.remoto import protocolo as P
 from core.remoto.reproductor import ReproductorAudio
+from core.remoto.cw_servidor import GestorCw
+from core.remoto.tx_digital import SalidaProgramada
 
 log = logging.getLogger("radiolog.remoto.servidor")
+
+
+class _SesionTxd:
+    """Una transmisión digital en curso en el servidor."""
+
+    def __init__(self, salida, antes: float, despues: float, max_s: float, dueno: str, t_apertura: float) -> None:
+        self.salida = salida
+        self.antes, self.despues, self.max_s, self.dueno = antes, despues, max_s, dueno
+        self.t_apertura = t_apertura
+        self.t0 = None                 # hora (reloj del servidor) a la que suena la primera muestra
+        self.t_ptt = 0.0               # hora a la que hay que poner el PTT
+        self.t_ptt_real = 0.0
+        self.ptt_puesto = False
+        self.fin = False               # el cliente ya no manda más audio
+        self.abortar = None            # (motivo, texto) si hay que cortar
+        self.retraso = 0.0
+        self.tramas = 0
+        self.hilo = None
 
 
 class ServidorRadio:
@@ -39,7 +59,9 @@ class ServidorRadio:
                  max_tx_s: float = 180.0, tx_sin_ping_s: float = 3.0, silencio_max_s: float = 10.0,
                  ciclo_s: float = 0.25, reconectar_radio_s: float = 3.0, audio_entrada: str | None = None, captura_factory=None,
                  audio_salida: str | None = None, salida_factory=None, tx_pico: float = 0.8, tx_ganancia: float = 1.0,
-                 cifrado: bool = True, carpeta_cert=None, redes_permitidas=None, emparejar_fichero=None, buscar_radio=None, estado_radio_fichero=None):
+                 cifrado: bool = True, carpeta_cert=None, redes_permitidas=None, emparejar_fichero=None, buscar_radio=None, estado_radio_fichero=None,
+                 salida_digital_factory=None, reloj=time.monotonic, puerto_clave: str = "", linea_clave: str = "dtr", invertir_clave: bool = False,
+                 puerto_radio_clave=None, cw_tecla_max_s: float = 2.0):
         if not clave or len(clave) < 8:
             raise ValueError("La clave es obligatoria (mínimo 8 caracteres)")
         self.motor = motor                      # un CatEngine
@@ -81,6 +103,18 @@ class ServidorRadio:
         self.tx_ganancia = max(0.0, float(tx_ganancia))
         self.tx_tramas = 0
         self.tx_descartadas = 0
+        # transmisión de modos digitales (FT8, RTTY…): el audio llega por adelantado y suena en una línea de tiempo absoluta (core/remoto/tx_digital.py);
+        # el PTT lo manda el servidor (ver _txd_*). `salida_digital_factory()` solo se usa en las pruebas; `reloj` es el reloj monótono del servidor.
+        self._salida_digital_factory = salida_digital_factory
+        self._reloj = reloj
+        self._txd: _SesionTxd | None = None
+        self._lock_txd = threading.RLock()
+        # CW por la radio remota: el keyer se ejecuta aquí y mueve una línea DTR/RTS del puerto de clave (core/remoto/cw_servidor.py). Sin `puerto_clave` queda desactivado.
+        from core.remoto import autoconfig as _AC
+        self._cw = GestorCw(puerto_clave, linea_clave, invertir_clave, avisar=self._txd_avisar, ptt=self._cw_ptt, otro_tx=self._cw_otro_tx,
+                            radio_lista=self._cw_radio_lista, puerto_cat=lambda: str(getattr(self.motor.backend, "port", "") or ""),
+                            modelo=lambda: str(getattr(self.motor.backend, "model", "") or ""), cliente_vivo=self._cw_cliente_vivo,
+                            puerto_radio=puerto_radio_clave, resolver_auto=_AC.puerto_clave_auto, tecla_max_s=cw_tecla_max_s, reloj=time.monotonic)
         # cifrado TLS con certificado propio (se crea la primera vez) y, opcionalmente, solo desde ciertas redes (p. ej. la de Tailscale)
         self.cifrado = bool(cifrado)
         self._ctx_tls: ssl.SSLContext | None = None
@@ -183,6 +217,8 @@ class ServidorRadio:
             h.start()
             self._hilos.append(h)
         log.info("Servidor de radio escuchando en %s:%d", self.host, self.puerto)
+        if self._cw.configurado:
+            self._cw.preparar()                                    # abre el puerto de la clave (en reposo) ya, no al primer envío
         return self.puerto
 
     def detener(self) -> None:
@@ -191,6 +227,8 @@ class ServidorRadio:
         h = self._hilo_barrido
         if h is not None:
             h.join(timeout=3.0)
+        self._txd_abortar("servidor", "servidor detenido")
+        self._cw.cerrar_todo()
         self._soltar_ptt("servidor detenido")
         self._audio_rx(False)
         self._audio_tx(False)
@@ -313,7 +351,8 @@ class ServidorRadio:
                 caps = {}
             self._enviar(conn, {"t": "ok", "resp": P.respuesta(self.clave, str(auth.get("reto", "00")), b"servidor", self._huella),
                                 "caps": caps, "modelo": caps.get("name", "Radio"), "v": P.VERSION_PROTOCOLO,
-                                "audio": {"rx": self._audio_disponible(), "tx": self._tx_disponible(), "fs": A.FS_RED, "codec": "pcm16", "trama_ms": A.TRAMA_MS},
+                                "audio": {"rx": self._audio_disponible(), "tx": self._tx_disponible(), "txd": self._txd_disponible(), "fs": A.FS_RED, "codec": "pcm16",
+                                          "trama_ms": A.TRAMA_MS, **self._cw.info()},
                                 "cifrado": self.cifrado})
             log.info("Cliente conectado desde %s", ip)
             self._anotar_conexion(ip)
@@ -330,6 +369,8 @@ class ServidorRadio:
             self._cerrar(conn if conn is not None else sock)
             if era_el_cliente:
                 self._barrido_cancelar_ev.set()
+                self._txd_abortar("cliente", "el cliente se ha desconectado")
+                self._cw.cerrar("cliente")
                 self._soltar_ptt("el cliente se ha desconectado")
                 self._audio_rx(False)
                 self._audio_tx(False)
@@ -356,9 +397,13 @@ class ServidorRadio:
         tipo = m.get("t")
         if tipo == "ping":
             self._ultimo_ping = time.monotonic()
-            self._enviar(sock, {"t": "pong", "ts": m.get("ts")})
+            self._enviar(sock, {"t": "pong", "ts": m.get("ts"), "st": self._reloj()})      # st: la hora del servidor (para sincronizar los relojes)
         elif tipo == "audio_tx":
             self._trama_tx(m)
+        elif tipo == "txd":
+            self._txd_mensaje(sock, m)
+        elif tipo == "cw":
+            self._cw_mensaje(sock, m)
         elif tipo == "cmd":
             ok, msg = self._ejecutar(str(m.get("op", "")), m.get("a", []))
             self._enviar(sock, {"t": "resp", "id": m.get("id"), "ok": ok, "msg": msg})
@@ -459,8 +504,12 @@ class ServidorRadio:
             self._enviar(sock, dict(res, t="barrido"))
         self._ultimo_estado_json = ""
 
-    def _ptt(self, on: bool) -> tuple[bool, str]:
+    def _ptt(self, on: bool, txd: bool = False) -> tuple[bool, str]:
         if on:
+            if self._txd is not None and not txd:
+                return False, "Hay una transmisión digital en curso"
+            if self._cw.ocupado and not txd:
+                return False, "Hay una transmisión de CW en curso"
             if not self.motor.is_connected():
                 return False, "La radio no está conectada"
             if self.motor.barriendo:
@@ -502,18 +551,34 @@ class ServidorRadio:
         self._ultimo_estado_json = ""
 
     def _vigilante(self) -> None:
+        desde = None                                              # desde cuándo se está dando la razón para soltar el PTT
+        vueltas = 0
         while not self._parar.wait(0.1):
+            vueltas += 1
+            if vueltas % 50 == 0 and self._cw.configurado and not self._cw.disponible:
+                self._cw.preparar()                               # el puerto de la clave aún no estaba (radio apagada, sin enchufar…): se reintenta
             if not self._ptt_on:
+                desde = None
                 continue
             ahora = time.monotonic()
             with self._lock_cliente:
                 hay_cliente = self._cliente is not None
+            motivo = None
             if not hay_cliente:
-                self._soltar_ptt("no hay cliente")
+                motivo = "no hay cliente"
             elif ahora - self._ultimo_ping > self.tx_sin_ping_s:
-                self._soltar_ptt("el cliente no da señales de vida")
+                motivo = "el cliente no da señales de vida"
             elif ahora - self._ptt_desde > self.max_tx_s:
-                self._soltar_ptt("tiempo máximo de transmisión (%d s)" % self.max_tx_s)
+                motivo = "tiempo máximo de transmisión (%d s)" % self.max_tx_s
+            if motivo is None:
+                desde = None
+                continue
+            if self._txd is not None or self._cw.activo:             # una transmisión digital o de CW: ella baja el audio / suelta la clave y el PTT; este seguro solo
+                desde = desde or ahora                               # entra si en 1,5 s no lo ha hecho
+                if ahora - desde < 1.5:
+                    continue
+            self._soltar_ptt(motivo)
+            desde = None
 
     # ── audio de recepción ───────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -593,6 +658,10 @@ class ServidorRadio:
             return True, ""
         if not self._tx_disponible():
             return False, "Este servidor no tiene salida de audio para transmitir (falta --audio-salida)"
+        if self._txd is not None:
+            return False, "Hay una transmisión digital en curso"
+        if self._cw.ocupado:
+            return False, "Hay una transmisión de CW en curso"
         if self._tx_audio_on:
             return True, ""
         salida = self._salida_factory() if self._salida_factory else ReproductorAudio(dispositivo=self.audio_salida, retardo_ms=80, max_ms=300)
@@ -618,6 +687,307 @@ class ServidorRadio:
         x = A.de_pcm16(datos) * self.tx_ganancia
         salida.alimentar(A.a_pcm16(np.clip(x, -self.tx_pico, self.tx_pico)))
         self.tx_tramas += 1
+
+    # ── transmisión de modos digitales ───────────────────────────────────────────────────────────────────────────────────────
+    #
+    #   cliente -> servidor  {"t":"txd","op":"abrir","id":n,"antes_ms":150,"despues_ms":100,"max_s":120,"dueno":"ft8"}   (contesta «txd_resp»)
+    #                        {"t":"txd","op":"inicio","t0":hora_del_servidor}      a qué hora suena la primera muestra
+    #                        {"t":"txd","op":"datos","i":muestra,"d":base64}       audio PCM16 8 kHz; `i` = nº de su primera muestra
+    #                        {"t":"txd","op":"fin"}                                no hay más audio: acaba, espera el «después» y suelta el PTT
+    #                        {"t":"txd","op":"parar"}                              corta ya (bajada de 30 ms) y suelta el PTT
+    #   servidor -> cliente  {"t":"txd_estado",...} cada 100 ms y {"t":"txd_fin","motivo":...,"msg":...} al acabar por lo que sea
+    #
+    # El PTT lo pone y lo suelta el SERVIDOR: se pone `antes_ms` antes de la primera muestra y se suelta `despues_ms` después de que SUENE la última
+    # (contando la latencia de la tarjeta). Si el cliente se va, deja de dar señales de vida, falla el PTT o se pasa el tiempo máximo, el audio se corta con una
+    # bajada suave y el PTT se suelta. Una transmisión digital y una de voz (o dos digitales) nunca a la vez.
+
+    def _txd_disponible(self) -> bool:
+        return self._salida_digital_factory is not None or bool(self.audio_salida)
+
+    def _txd_responder(self, sock, ident, ok: bool, msg: str = "") -> None:
+        self._enviar(sock, {"t": "txd_resp", "id": ident, "ok": ok, "msg": msg, "st": self._reloj()})
+
+    def _txd_mensaje(self, sock, m: dict) -> None:
+        op = m.get("op")
+        try:
+            if op == "abrir":
+                self._txd_abrir(sock, m)
+            elif op == "inicio":
+                self._txd_inicio(m)
+            elif op == "datos":
+                self._txd_datos(m)
+            elif op == "fin":
+                self._txd_fin()
+            elif op == "parar":
+                self._txd_abortar("parado", "parado por el cliente")
+            else:
+                self._enviar(sock, {"t": "error", "msg": "Mensaje de transmisión desconocido"})
+        except Exception:
+            log.error("Fallo en un mensaje de transmisión digital (%r)", op, exc_info=True)
+            self._txd_abortar("error", "fallo en el servidor")
+
+    @staticmethod
+    def _numero(valor, minimo: float, maximo: float, defecto: float) -> float:
+        if isinstance(valor, bool) or not isinstance(valor, (int, float)) or valor != valor:
+            return defecto
+        return min(maximo, max(minimo, float(valor)))
+
+    def _txd_abrir(self, sock, m: dict) -> None:
+        ident = m.get("id")
+        if not self._txd_disponible():
+            return self._txd_responder(sock, ident, False, "Este servidor no tiene salida de audio para transmitir (falta --audio-salida)")
+        antes = self._numero(m.get("antes_ms"), 0.0, 1000.0, 150.0) / 1000.0
+        despues = self._numero(m.get("despues_ms"), 0.0, 1000.0, 100.0) / 1000.0
+        max_s = self._numero(m.get("max_s"), 1.0, self.max_tx_s, self.max_tx_s)
+        dueno = str(m.get("dueno", "") or "")[:16]
+        with self._lock_txd:
+            if self._txd is not None:
+                return self._txd_responder(sock, ident, False, "Ya hay una transmisión digital en curso")
+            if self._cw.ocupado:
+                return self._txd_responder(sock, ident, False, "Hay una transmisión de CW en curso")
+            if self._ptt_on or self._tx_audio_on:
+                return self._txd_responder(sock, ident, False, "La radio ya está transmitiendo (voz)")
+            if not self.motor.is_connected():
+                return self._txd_responder(sock, ident, False, "La radio no está conectada")
+            if self.motor.barriendo:
+                return self._txd_responder(sock, ident, False, "Se está barriendo la banda: espera a que termine")
+            salida = self._salida_digital_factory() if self._salida_digital_factory else SalidaProgramada(self.audio_salida, reloj=self._reloj)
+            if not salida.abrir():
+                return self._txd_responder(sock, ident, False, getattr(salida, "error", "") or "No se puede abrir la salida de audio hacia la radio")
+            ses = _SesionTxd(salida, antes, despues, max_s, dueno, self._reloj())
+            self._txd = ses
+            ses.hilo = threading.Thread(target=self._txd_bucle, args=(ses,), daemon=True, name="remoto-txd")
+            ses.hilo.start()
+        log.info("Transmisión digital abierta (%s): antes %.0f ms, después %.0f ms, máximo %.0f s", dueno or "?", antes * 1000, despues * 1000, max_s)
+        self._txd_responder(sock, ident, True)
+
+    def _txd_inicio(self, m: dict) -> None:
+        ses = self._txd
+        if ses is None or ses.t0 is not None:
+            return
+        ahora = self._reloj()
+        t0 = self._numero(m.get("t0"), ahora - 60.0, ahora + 30.0, ahora + ses.antes + 0.05)
+        minimo = ahora + ses.antes + 0.05                       # el PTT tiene que poder ponerse `antes` ANTES de la primera muestra
+        t0e = max(t0, minimo)
+        ses.retraso = t0e - t0
+        if ses.retraso > 0.02:
+            log.warning("La transmisión digital llegó tarde: empieza %.0f ms después de lo pedido", ses.retraso * 1000)
+        ses.salida.anclar(t0e)
+        ses.t_ptt = t0e - ses.antes - 0.04
+        ses.t0 = t0e
+
+    def _txd_datos(self, m: dict) -> None:
+        ses = self._txd
+        if ses is None or ses.fin:
+            return
+        try:
+            datos = base64.b64decode(m.get("d", ""), validate=True)
+        except (ValueError, TypeError):
+            return
+        indice = m.get("i")
+        if isinstance(indice, bool) or not isinstance(indice, int) or indice < 0 or not datos or len(datos) % 2 or len(datos) > 64 * 1024:
+            return
+        if indice + len(datos) // 2 > int((ses.max_s + 5.0) * A.FS_RED):
+            return self._txd_abortar("error", "demasiado audio para el tiempo máximo")
+        x = np.clip(A.de_pcm16(datos) * self.tx_ganancia, -self.tx_pico, self.tx_pico)
+        ses.salida.poner(indice, x)
+        ses.tramas += 1
+
+    def _txd_fin(self) -> None:
+        ses = self._txd
+        if ses is None or ses.fin:
+            return
+        ses.fin = True
+        ses.salida.finalizar()
+
+    def _txd_abortar(self, motivo: str, msg: str = "") -> None:
+        """Corta la transmisión digital que haya (con su bajada suave) y suelta el PTT. Se puede llamar siempre; si no hay nada, no hace nada."""
+        ses = self._txd
+        if ses is None:
+            return
+        if ses.abortar is None:
+            ses.abortar = (motivo, msg)
+        h = ses.hilo
+        if h is not None and h is not threading.current_thread():
+            h.join(timeout=2.0)
+
+    def _soltar_ptt_reintentando(self, motivo: str) -> bool:
+        """Suelta el PTT si está puesto. True si queda suelto. Si la radio no contesta, se insiste (≈ 1 s) y, si aun así no, NO se da por soltado: `_ptt_on` sigue
+        puesto para que el vigilante lo siga intentando (cada 0,1 s si no hay cliente)."""
+        if not self._ptt_on:
+            return True
+        for intento in range(10):
+            try:
+                self.motor.set_ptt(False)
+                self._ptt_on = False
+                self._ultimo_estado_json = ""
+                log.info("PTT soltado (%s)", motivo)
+                return True
+            except Exception:
+                log.error("No se pudo soltar el PTT (intento %d)", intento + 1, exc_info=(intento == 0))
+                time.sleep(0.1)
+        log.error("NO SE HA PODIDO SOLTAR EL PTT: se sigue intentando")
+        return False
+
+    def _txd_soltar_ptt(self, ses, motivo: str) -> bool:
+        """Suelta el PTT que puso esta transmisión digital (ver `_soltar_ptt_reintentando`)."""
+        if not (ses.ptt_puesto and self._ptt_on):
+            return True
+        return self._soltar_ptt_reintentando("transmisión digital: " + motivo)
+
+    def _txd_decidir(self, ses) -> tuple[str, str] | None:
+        """¿Hay que cortar ya la transmisión? (motivo, texto) o None."""
+        if ses.abortar is not None:
+            return ses.abortar
+        if self._parar.is_set():
+            return "servidor", "servidor detenido"
+        with self._lock_cliente:
+            hay_cliente = self._cliente is not None
+        if not hay_cliente:
+            return "cliente", "el cliente se ha desconectado"
+        if time.monotonic() - self._ultimo_ping > self.tx_sin_ping_s:
+            return "sin_ping", "el cliente no da señales de vida"
+        if ses.ptt_puesto and not self._ptt_on:
+            return "ptt", "el PTT se soltó por otro motivo"
+        if getattr(ses.salida, "atascada", False):
+            return "audio", "la tarjeta de sonido de la radio ha dejado de sacar audio"
+        if ses.t0 is None and not ses.fin and self._reloj() - ses.t_apertura > 15.0:
+            return "inactiva", "la transmisión se abrió y no ha llegado nada"
+        return None
+
+    def _txd_bucle(self, ses) -> None:
+        motivo, msg = "acabado", ""
+        try:
+            ultimo_estado = 0.0
+            while True:
+                ahora = self._reloj()
+                corte = self._txd_decidir(ses)
+                if corte is not None:
+                    motivo, msg = corte
+                    break
+                if ses.t0 is not None and not ses.ptt_puesto and ahora >= ses.t_ptt:
+                    ok, texto = self._ptt(True, txd=True)               # el PTT, antes de la primera muestra
+                    if not ok:
+                        motivo, msg = "ptt", texto
+                        break
+                    ses.ptt_puesto = True
+                    ses.t_ptt_real = ahora
+                if ses.ptt_puesto and ahora - ses.t_ptt_real > ses.max_s:
+                    motivo, msg = "tiempo", "tiempo máximo de transmisión (%d s)" % int(ses.max_s)
+                    break
+                if ses.fin and ses.t0 is None:                           # se cerró sin haber transmitido nada
+                    break
+                if ses.salida.terminada:
+                    break
+                if ahora - ultimo_estado >= 0.1:
+                    ultimo_estado = ahora
+                    self._txd_avisar({"t": "txd_estado", "pos": ses.salida.posicion, "recibido": ses.salida.recibido, "ptt": self._ptt_on,
+                                      "huecos": int(getattr(ses.salida, "huecos", 0)), "retraso_ms": int(1000 * (ses.retraso + getattr(ses.salida, "retraso_s", 0.0))),
+                                      "arrancada": bool(getattr(ses.salida, "arrancada", False))})
+                time.sleep(0.01)
+        except Exception as exc:
+            log.error("Fallo en la transmisión digital", exc_info=True)
+            motivo, msg = "error", str(exc) or "fallo en el servidor"
+        finally:
+            self._txd_terminar(ses, motivo, msg)
+
+    def _txd_terminar(self, ses, motivo: str, msg: str) -> None:
+        """Último paso, siempre: si hay que cortar, bajada suave; después SIEMPRE se suelta el PTT (en una transmisión normal, solo cuando la última muestra
+        ya ha sonado de verdad y ha pasado el «después»), se cierra el audio y se avisa al cliente."""
+        try:
+            if motivo != "acabado" and not ses.salida.terminada:
+                ses.salida.parar_suave()
+                limite = time.monotonic() + 0.5
+                while not ses.salida.terminada and time.monotonic() < limite:
+                    time.sleep(0.005)
+            fin_audible = getattr(ses.salida, "t_fin_audible", None)
+            if motivo == "acabado" and fin_audible is not None:
+                espera = fin_audible + ses.despues - self._reloj()
+                if espera > 0:
+                    time.sleep(min(espera, 2.0))
+            elif fin_audible is not None:
+                espera = fin_audible + 0.02 - self._reloj()                # la bajada suave tiene que acabar de sonar
+                if espera > 0:
+                    time.sleep(min(espera, 0.2))
+            if not self._txd_soltar_ptt(ses, motivo):
+                motivo, msg = "error", "No se ha podido soltar el PTT: la radio no contesta"
+        finally:
+            try:
+                ses.salida.cerrar()
+            except Exception:
+                log.error("No se pudo cerrar la salida de transmisión digital", exc_info=True)
+            with self._lock_txd:
+                if self._txd is ses:
+                    self._txd = None
+            if motivo not in ("acabado", "parado"):
+                log.warning("Transmisión digital cortada: %s", msg or motivo)
+            self._txd_avisar({"t": "txd_fin", "motivo": motivo, "msg": msg, "huecos": int(getattr(ses.salida, "huecos", 0)),
+                              "retraso_ms": int(1000 * (ses.retraso + getattr(ses.salida, "retraso_s", 0.0)))})
+
+    def _txd_avisar(self, mensaje: dict) -> None:
+        with self._lock_cliente:
+            sock = self._cliente
+        if sock is not None:
+            self._enviar(sock, mensaje)
+
+    # ── CW ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    def _cw_ptt(self, on: bool) -> None:
+        """El PTT del keyer de CW (por CAT, como el de la voz): se pone con el seguro de siempre y se suelta con reintentos. Si no se puede poner, el keyer lo anota y sigue."""
+        if on:
+            ok, texto = self._ptt(True, txd=True)
+            if not ok:
+                raise RuntimeError(texto)
+        else:
+            self._soltar_ptt_reintentando("CW")
+
+    def _cw_otro_tx(self) -> str:
+        """Por qué NO puede empezar a transmitir CW ahora («» = puede): una transmisión digital o de voz en marcha."""
+        if self._txd is not None:
+            return "Hay una transmisión digital en curso"
+        if self._tx_audio_on or (self._ptt_on and not self._cw.ptt_propio):
+            return "La radio ya está transmitiendo (voz)"
+        return ""
+
+    def _cw_radio_lista(self) -> str:
+        if not self.motor.is_connected():
+            return "La radio no está conectada"
+        if self.motor.barriendo:
+            return "Se está barriendo la banda: espera a que termine"
+        return ""
+
+    def _cw_cliente_vivo(self) -> str:
+        with self._lock_cliente:
+            hay = self._cliente is not None
+        if not hay:
+            return "el cliente se ha desconectado"
+        if time.monotonic() - self._ultimo_ping > self.tx_sin_ping_s:
+            return "el cliente no da señales de vida"
+        return ""
+
+    def _cw_mensaje(self, sock, m: dict) -> None:
+        op = m.get("op")
+        try:
+            if op == "abrir":
+                ok, texto = self._cw.abrir(m)
+                self._enviar(sock, {"t": "cw_resp", "id": m.get("id"), "ok": ok, "msg": texto})
+            elif op == "enviar":
+                ok, texto, _n = self._cw.enviar(m.get("texto"), m.get("abreviar") is True)
+                if not ok:
+                    self._enviar(sock, {"t": "cw_error", "msg": texto, "rechazado": True})
+            elif op == "wpm":
+                self._cw.poner_wpm(m.get("wpm"))
+            elif op == "ptt":
+                self._cw.poner_ptt(m.get("on"))
+            elif op == "parar":
+                self._cw.parar()
+            elif op == "cerrar":
+                self._cw.cerrar("cerrado", avisar=False)
+            else:
+                self._enviar(sock, {"t": "error", "msg": "Mensaje de CW desconocido"})
+        except Exception:
+            log.error("Fallo en un mensaje de CW (%r)", op, exc_info=True)
+            self._cw.cerrar("error")
 
     # ── la radio ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
